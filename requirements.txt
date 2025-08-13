@@ -7,8 +7,9 @@ seaborn>=0.11.0
 
 # Deep learning
 # Note: On Apple Silicon (M1/M2/M3), these wheels work via pip. For conda, see README for an alternative.
-torch>=1.9.0
-torchvision>=0.10.0
+# DNABERT-like transformer uses features best supported on Torch 2.x
+torch>=2.0.0
+torchvision>=0.15.0
 
 # Notebooks
 jupyterlab>=3.6

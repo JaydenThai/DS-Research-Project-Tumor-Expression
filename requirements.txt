@@ -1,0 +1,15 @@
+# Core scientific Python stack
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+matplotlib>=3.3.0
+seaborn>=0.11.0
+
+# Deep learning
+# Note: On Apple Silicon (M1/M2/M3), these wheels work via pip. For conda, see README for an alternative.
+torch>=1.9.0
+torchvision>=0.10.0
+
+# Notebooks
+jupyterlab>=3.6
+ipykernel>=6.0

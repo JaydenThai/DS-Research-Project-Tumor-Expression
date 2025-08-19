@@ -1,0 +1,99 @@
+{
+  "experiment_info": {
+    "name": "promoter_cnn_onehot_comprehensive",
+    "timestamp": "2025-08-18 23:56:31",
+    "sequence_length": 600,
+    "random_seed": 42,
+    "device": "mps"
+  },
+  "model_architecture": {
+    "type": "PromoterCNN",
+    "sequence_length": 600,
+    "depth": 2,
+    "base_channels": 24,
+    "dropout": 0.2,
+    "num_classes": 5
+  },
+  "training_config": {
+    "depth": 2,
+    "base_channels": 24,
+    "dropout": 0.2,
+    "num_classes": 5,
+    "batch_size": 128,
+    "num_epochs": 50,
+    "early_stopping_patience": 10,
+    "optimizer": "adam",
+    "learning_rate": 0.01,
+    "weight_decay": 1e-05,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-08,
+    "amsgrad": false,
+    "momentum": 0.9,
+    "nesterov": false,
+    "dampening": 0.0,
+    "alpha": 0.99,
+    "centered": false,
+    "scheduler": "plateau",
+    "scheduler_patience": 8,
+    "scheduler_factor": 0.3,
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.1,
+    "scheduler_t_max": 50,
+    "scheduler_eta_min": 1e-06,
+    "gradient_clipping": false,
+    "max_grad_norm": 1.0,
+    "loss_function": "kldiv",
+    "l1_regularization": 0.0,
+    "l2_regularization": 0.0,
+    "model_name": "promoter_cnn"
+  },
+  "performance_metrics": {
+    "overall": {
+      "average_r2": -0.001428052303045746,
+      "average_mse": 0.10236433893442154,
+      "average_mae": 0.2507660984992981,
+      "average_pearson": 0.05592141606072417
+    },
+    "by_component": {
+      "Component_1": {
+        "R2": -0.0060500560534595405,
+        "MSE": 0.05704006925225258,
+        "MAE": 0.1436605006456375,
+        "Pearson": 0.07854033684077705
+      },
+      "Component_2": {
+        "R2": -0.0020427819565440597,
+        "MSE": 0.14587242901325226,
+        "MAE": 0.3448421359062195,
+        "Pearson": 0.07257170486847325
+      },
+      "Component_3": {
+        "R2": -0.002628834302404792,
+        "MSE": 0.06907238066196442,
+        "MAE": 0.17611676454544067,
+        "Pearson": 0.03397270650725502
+      },
+      "Component_4": {
+        "R2": 0.0018369168631439114,
+        "MSE": 0.09880353510379791,
+        "MAE": 0.26000741124153137,
+        "Pearson": 0.045195044128847464
+      },
+      "Component_5": {
+        "R2": 0.0017444939340357513,
+        "MSE": 0.14103327691555023,
+        "MAE": 0.32920366525650024,
+        "Pearson": 0.049327287958268067
+      }
+    },
+    "best_validation_loss": 1.1122654557228089,
+    "final_train_loss": 1.086903144483981,
+    "final_val_loss": 1.1149957060813904
+  },
+  "training_info": {
+    "epochs_trained": 49,
+    "total_time_seconds": 54.461201906204224,
+    "final_learning_rate": 0.003
+  }
+}

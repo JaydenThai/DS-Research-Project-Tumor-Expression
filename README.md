@@ -4,11 +4,32 @@ This repository contains data exploration notebooks and deep learning models for
 
 ## Repository structure
 
-- `Main Work/`
-  - `Data/`: input and processed dataset files and plots
-  - `models/`
-    - `promoter_cnn/`: CNN model notebook, weights, results image, and requirements specific to the model
-  - `Prelim/`: early exploratory notebooks
+```
+DS-Research-Project-Tumor-Expression/
+├── README.md
+├── requirements.txt
+├── data/
+│   ├── raw/                    # Original datasets
+│   ├── processed/              # Cleaned/transformed data
+│   └── outputs/                # Generated plots, reports
+├── notebooks/
+│   ├── exploratory/            # Early exploration (bimodality, data_exploration)
+│   ├── data_processing/        # Data cleaning/preparation (ICE-T_ProDat)
+│   └── experiments/            # Model experiments (promoter_cnn, baseline_simple, dnabert)
+├── src/
+│   ├── models/
+│   │   ├── baseline/           # Simple baseline models
+│   │   ├── cnn/                # CNN model implementation
+│   │   ├── dnabert/            # DNABERT model implementation
+│   │   └── regression/         # Regression models
+│   └── utils/                  # Shared utilities (data, training, viz)
+├── results/
+│   ├── model_weights/          # Trained model weights (.pth files)
+│   ├── plots/                  # Generated visualizations
+│   └── analysis/               # Analysis results and reports
+└── docs/
+    └── notes/                  # Meeting notes and documentation
+```
 
 ## Quickstart
 
@@ -70,23 +91,25 @@ python -m ipykernel install --user --name tumor-exp --display-name "Python (tumo
 jupyter lab
 ```
 
-- Promoter CNN assets are in `Main Work/models/promoter_cnn/`:
-  - `promoter_cnn.ipynb`: main notebook
-  - `best_promoter_cnn.pth`: trained weights
-  - `cnn_results.png`: example results
+- Promoter CNN assets are in:
+  - `notebooks/experiments/promoter_cnn.ipynb`: main notebook
+  - `results/model_weights/best_promoter_cnn.pth`: trained weights
+  - `results/plots/cnn_results.png`: example results
 
 ### 6) Data locations
 
-- Raw/processed data: `Main Work/Data/` and `Main Work/Processed-Data/`
+- Raw data: `data/raw/`
+- Processed data: `data/processed/`
+- Results and plots: `results/`
 
 If paths in notebooks need adjusting, search for hard-coded paths and update accordingly.
 
 ## Reproducing the CNN results
 
 1. Ensure dependencies are installed (see step 3).
-2. Launch JupyterLab and open `Main Work/models/promoter_cnn/promoter_cnn.ipynb`.
-3. If the notebook expects data at `Main Work/Data/` or `Main Work/Processed-Data/`, keep the repo layout intact.
-4. To use the provided weights, load `best_promoter_cnn.pth` in the notebook cells that define `torch.load(...)`.
+2. Launch JupyterLab and open `notebooks/experiments/promoter_cnn.ipynb`.
+3. The notebook expects data at `data/processed/` which should be populated after reorganization.
+4. To use the provided weights, load from `results/model_weights/best_promoter_cnn.pth`.
 
 ## Project-specific requirements
 

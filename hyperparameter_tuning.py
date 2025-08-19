@@ -157,15 +157,19 @@ class DeviceManager:
     def get_dataloader_kwargs(self) -> Dict[str, Any]:
         """Get optimized DataLoader kwargs for the current device"""
         if self.device_name == "cuda":
-            # CUDA optimizations: pin memory and multiple workers
+            # CUDA optimizations: pin memory and multiple workers for maximum throughput
+            import multiprocessing
+            num_workers = min(8, max(2, multiprocessing.cpu_count() // 2))  # Use more workers
             return {
                 "pin_memory": True, 
-                "num_workers": min(4, torch.get_num_threads()),
+                "num_workers": num_workers,
                 "persistent_workers": True,
-                "prefetch_factor": 2
+                "prefetch_factor": 4,  # Increased prefetch for better GPU utilization
+                "drop_last": True,  # Ensure consistent batch sizes for cuDNN optimization
+                "pin_memory_device": "cuda"  # Pin to specific CUDA device
             }
         else:
-            return {"num_workers": 0}  # MPS/CPU: single worker for stability
+            return {"num_workers": 0, "drop_last": False}  # MPS/CPU: single worker for stability
     
     def get_memory_info(self) -> Dict[str, float]:
         """Get current device memory information"""
@@ -190,6 +194,59 @@ class DeviceManager:
             if self.verbose:
                 memory_info = self.get_memory_info()
                 print(f"🧹 CUDA cache cleared - Free: {memory_info['free_gb']:.1f}GB")
+    
+    def find_optimal_batch_size(self, model, sample_input_shape, max_batch_size=1024):
+        """Find the largest batch size that fits in GPU memory"""
+        if self.device_name != "cuda":
+            return 32  # Default for non-CUDA devices
+        
+        print("🔍 Finding optimal batch size for maximum GPU utilization...")
+        
+        # Create a dummy model for testing
+        test_model = model.to(self.device)
+        test_model.train()
+        
+        optimal_batch_size = 32
+        
+        for batch_size in [32, 64, 128, 256, 512, 1024, 2048]:
+            if batch_size > max_batch_size:
+                break
+                
+            try:
+                self.clear_cache()
+                
+                # Create test batch
+                test_input = torch.randn(batch_size, *sample_input_shape[1:], device=self.device)
+                test_target = torch.randn(batch_size, 5, device=self.device).softmax(dim=1)
+                
+                # Test forward pass
+                with torch.cuda.amp.autocast():
+                    output = test_model(test_input)
+                    loss = nn.KLDivLoss(reduction='batchmean')(
+                        torch.log_softmax(output, dim=1), test_target
+                    )
+                
+                # Test backward pass
+                loss.backward()
+                
+                # Check memory usage
+                memory_info = self.get_memory_info()
+                if memory_info['utilization'] < 90:  # Keep some headroom
+                    optimal_batch_size = batch_size
+                    print(f"   ✅ Batch size {batch_size}: {memory_info['utilization']:.1f}% GPU memory")
+                else:
+                    print(f"   ⚠️  Batch size {batch_size}: {memory_info['utilization']:.1f}% GPU memory (too high)")
+                    break
+                    
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print(f"   ❌ Batch size {batch_size}: Out of memory")
+                    break
+                else:
+                    raise e
+        
+        print(f"🎯 Optimal batch size: {optimal_batch_size}")
+        return optimal_batch_size
 
 
 # ================================
@@ -290,18 +347,64 @@ class PromoterCNN(nn.Module):
 # Search Spaces
 # ================================
 
+def get_optimized_search_space(device_manager):
+    """Get search space optimized for the current device"""
+    base_space = {
+        'depth': [1, 2, 3, 4],
+        'base_channels': [16, 24, 32, 48, 64],
+        'dropout': [0.1, 0.2, 0.3, 0.4, 0.5],
+        'learning_rate': [1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
+        'weight_decay': [0.0, 1e-6, 1e-5, 1e-4, 1e-3],
+        'optimizer': ['adam', 'adamw', 'sgd'],
+        'scheduler': ['plateau', 'cosine', 'step', 'none'],
+        'scheduler_patience': [3, 5, 8, 10],
+        'scheduler_factor': [0.3, 0.5, 0.7],
+        'loss_function': ['kldiv', 'mse'],
+        'gradient_accumulation_steps': [1, 2, 4]  # For effective larger batch sizes
+    }
+    
+    # Optimize batch sizes based on device
+    if device_manager.device_name == "cuda":
+        memory_info = device_manager.get_memory_info()
+        total_memory = memory_info.get('total_gb', 0)
+        
+        if total_memory >= 16.0:
+            # High-end GPU: Use large batch sizes for maximum utilization
+            base_space['batch_size'] = [128, 256, 512, 1024]
+            base_space['effective_batch_size'] = [256, 512, 1024, 2048]
+        elif total_memory >= 8.0:
+            # Mid-range GPU: Use medium-large batch sizes
+            base_space['batch_size'] = [64, 128, 256, 512]
+            base_space['effective_batch_size'] = [128, 256, 512, 1024]
+        elif total_memory >= 4.0:
+            # Lower-end GPU: Use medium batch sizes
+            base_space['batch_size'] = [32, 64, 128, 256]
+            base_space['effective_batch_size'] = [64, 128, 256, 512]
+        else:
+            # Very limited GPU: Use smaller batch sizes
+            base_space['batch_size'] = [16, 32, 64, 128]
+            base_space['effective_batch_size'] = [32, 64, 128, 256]
+    else:
+        # CPU/MPS: Use smaller batch sizes
+        base_space['batch_size'] = [16, 32, 64]
+        base_space['effective_batch_size'] = [32, 64, 128]
+    
+    return base_space
+
+# For backward compatibility
 COMPREHENSIVE_SEARCH_SPACE = {
     'depth': [1, 2, 3, 4],
     'base_channels': [16, 24, 32, 48, 64],
     'dropout': [0.1, 0.2, 0.3, 0.4, 0.5],
-    'batch_size': [16, 32, 64, 128],
+    'batch_size': [32, 64, 128, 256],  # Increased default batch sizes
     'learning_rate': [1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
     'weight_decay': [0.0, 1e-6, 1e-5, 1e-4, 1e-3],
     'optimizer': ['adam', 'adamw', 'sgd'],
     'scheduler': ['plateau', 'cosine', 'step', 'none'],
     'scheduler_patience': [3, 5, 8, 10],
     'scheduler_factor': [0.3, 0.5, 0.7],
-    'loss_function': ['kldiv', 'mse']
+    'loss_function': ['kldiv', 'mse'],
+    'gradient_accumulation_steps': [1, 2, 4]
 }
 
 
@@ -359,17 +462,24 @@ class HyperparameterTuner:
         else:
             return nn.KLDivLoss(reduction='batchmean')
     
-    def train_epoch(self, model, train_loader, criterion, optimizer):
-        """Train model for one epoch"""
+    def train_epoch(self, model, train_loader, criterion, optimizer, config):
+        """Train model for one epoch with gradient accumulation support"""
         model.train()
         total_loss = 0.0
+        accumulation_steps = config.get('gradient_accumulation_steps', 1)
         
         # CUDA optimizations
         if self.device_manager.device_name == "cuda":
             # Enable cuDNN benchmarking for consistent input sizes
             torch.backends.cudnn.benchmark = True
         
-        for sequences, targets in train_loader:
+        # Initialize gradient scaler for mixed precision
+        scaler = torch.cuda.amp.GradScaler() if self.device_manager.device_name == "cuda" else None
+        
+        optimizer.zero_grad()
+        accumulated_loss = 0.0
+        
+        for batch_idx, (sequences, targets) in enumerate(train_loader):
             sequences = self.device_manager.to_device(sequences)
             targets = self.device_manager.to_device(targets)
             
@@ -377,8 +487,6 @@ class HyperparameterTuner:
             if self.device_manager.device_name == "mps":
                 sequences = sequences.to(dtype=torch.float32)
                 targets = targets.to(dtype=torch.float32)
-            
-            optimizer.zero_grad()
             
             # Use autocast for CUDA mixed precision training
             if self.device_manager.device_name == "cuda":
@@ -388,20 +496,54 @@ class HyperparameterTuner:
                     if isinstance(criterion, nn.KLDivLoss):
                         outputs = F.log_softmax(outputs, dim=1)
                     loss = criterion(outputs, targets)
+                    # Scale loss for gradient accumulation
+                    loss = loss / accumulation_steps
             else:
                 outputs = model(sequences)
                 # Apply appropriate loss function
                 if isinstance(criterion, nn.KLDivLoss):
                     outputs = F.log_softmax(outputs, dim=1)
                 loss = criterion(outputs, targets)
+                # Scale loss for gradient accumulation
+                loss = loss / accumulation_steps
             
-            loss.backward()
+            # Backward pass with gradient scaling for mixed precision
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            accumulated_loss += loss.item()
             
-            optimizer.step()
-            total_loss += loss.item()
+            # Perform optimizer step after accumulation_steps
+            if (batch_idx + 1) % accumulation_steps == 0:
+                if scaler is not None:
+                    # Gradient clipping with scaler
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                
+                optimizer.zero_grad()
+                total_loss += accumulated_loss
+                accumulated_loss = 0.0
+        
+        # Handle any remaining gradients
+        if accumulated_loss > 0:
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            optimizer.zero_grad()
+            total_loss += accumulated_loss
         
         return total_loss / len(train_loader)
     
@@ -484,7 +626,7 @@ class HyperparameterTuner:
             
             for epoch in range(config.get('max_epochs', 30)):
                 # Train and validate
-                train_loss = self.train_epoch(model, train_loader, criterion, optimizer)
+                train_loss = self.train_epoch(model, train_loader, criterion, optimizer, config)
                 val_loss = self.validate_epoch(model, val_loader, criterion)
                 
                 # Update scheduler
@@ -567,20 +709,31 @@ class HyperparameterTuner:
         print(f"🎯 Starting comprehensive hyperparameter optimization with {num_trials} trials...")
         random.seed(seed)
         
-        # Show initial memory state for CUDA
+        # Get optimized search space for current device
+        search_space = get_optimized_search_space(self.device_manager)
+        
+        # Show initial memory state and optimization info for CUDA
         if self.device_manager.device_name == "cuda":
             memory_info = self.device_manager.get_memory_info()
             print(f"🖥️  Initial CUDA memory: {memory_info['free_gb']:.1f}GB free / {memory_info['total_gb']:.1f}GB total")
+            print(f"🚀 GPU Utilization Optimizations:")
+            print(f"   - Batch sizes: {search_space['batch_size']}")
+            print(f"   - Gradient accumulation: {search_space['gradient_accumulation_steps']}")
+            print(f"   - Mixed precision training: Enabled")
+            print(f"   - Optimized data loading: {self.device_manager.get_dataloader_kwargs()['num_workers']} workers")
         
         results = []
         for trial in range(1, num_trials + 1):
-            # Sample random configuration from comprehensive search space
-            config = {key: random.choice(values) for key, values in COMPREHENSIVE_SEARCH_SPACE.items()}
+            # Sample random configuration from optimized search space
+            config = {key: random.choice(values) for key, values in search_space.items()}
             
             # Clean up incompatible parameters
             if config.get('scheduler') != 'plateau':
                 config.pop('scheduler_patience', None)
                 config.pop('scheduler_factor', None)
+            
+            # Calculate effective batch size for reporting
+            effective_batch_size = config['batch_size'] * config.get('gradient_accumulation_steps', 1)
             
             # Clear CUDA cache before each trial
             if self.device_manager.device_name == "cuda":
@@ -590,7 +743,7 @@ class HyperparameterTuner:
             result = self.evaluate_config(config)
             results.append(result)
             
-            # Progress update with memory info
+            # Progress update with memory info and effective batch size
             memory_str = ""
             if self.device_manager.device_name == "cuda":
                 memory_info = self.device_manager.get_memory_info()
@@ -598,6 +751,7 @@ class HyperparameterTuner:
             
             print(f"Trial {trial:3d}/{num_trials}: "
                   f"val_loss={result.val_loss:.6f}, "
+                  f"batch={config['batch_size']}x{config.get('gradient_accumulation_steps', 1)}={effective_batch_size}, "
                   f"params={result.params:,}, "
                   f"time={result.duration_s:.1f}s{memory_str}")
             

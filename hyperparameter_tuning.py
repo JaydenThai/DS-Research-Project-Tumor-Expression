@@ -96,12 +96,33 @@ class DeviceManager:
             print(f"🖥️  Using device: {self.device_name} ({self.device})")
             if self.device_name == "cuda":
                 print(f"   GPU: {torch.cuda.get_device_name()}")
-                print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+                total_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+                print(f"   Memory: {total_memory:.1f}GB")
+                print(f"   Compute Capability: {torch.cuda.get_device_capability()}")
+                print(f"   CUDA Version: {torch.version.cuda}")
+                # Optimize batch sizes based on GPU memory
+                if total_memory >= 8.0:
+                    print(f"   Recommended batch sizes: 64-128 (high memory GPU)")
+                elif total_memory >= 4.0:
+                    print(f"   Recommended batch sizes: 32-64 (medium memory GPU)")
+                else:
+                    print(f"   Recommended batch sizes: 16-32 (low memory GPU)")
     
     def _select_device(self) -> Tuple[torch.device, str]:
         """Select the best available device (always prefer CUDA)"""
         if torch.cuda.is_available():
-            return torch.device("cuda"), "cuda"
+            # Test CUDA functionality
+            try:
+                torch.cuda.empty_cache()  # Clear any existing cache
+                test_tensor = torch.randn(2, 3, device='cuda')
+                test_result = test_tensor * 2.0
+                if hasattr(self, 'verbose') and self.verbose:
+                    print(f"✅ CUDA available and functional")
+                return torch.device("cuda"), "cuda"
+            except Exception as e:
+                if hasattr(self, 'verbose') and self.verbose:
+                    print(f"⚠️  CUDA available but not functional, falling back: {e}")
+        
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             # Test MPS compatibility with a simple operation
             try:
@@ -112,8 +133,8 @@ class DeviceManager:
                 if hasattr(self, 'verbose') and self.verbose:
                     print(f"⚠️  MPS available but not compatible, falling back to CPU: {e}")
                 return torch.device("cpu"), "cpu"
-        else:
-            return torch.device("cpu"), "cpu"
+        
+        return torch.device("cpu"), "cpu"
     
     def to_device(self, data):
         """Move data to device with compatibility handling"""
@@ -122,8 +143,11 @@ class DeviceManager:
         elif isinstance(data, dict):
             return {key: self.to_device(value) for key, value in data.items()}
         elif isinstance(data, torch.Tensor):
-            # Ensure consistent tensor type for MPS compatibility
-            if self.device_name == "mps":
+            if self.device_name == "cuda":
+                # CUDA optimized transfer with non-blocking
+                return data.to(self.device, non_blocking=True)
+            elif self.device_name == "mps":
+                # Ensure consistent tensor type for MPS compatibility
                 return data.to(self.device, dtype=torch.float32)
             else:
                 return data.to(self.device)
@@ -133,9 +157,39 @@ class DeviceManager:
     def get_dataloader_kwargs(self) -> Dict[str, Any]:
         """Get optimized DataLoader kwargs for the current device"""
         if self.device_name == "cuda":
-            return {"pin_memory": True, "num_workers": 4}
+            # CUDA optimizations: pin memory and multiple workers
+            return {
+                "pin_memory": True, 
+                "num_workers": min(4, torch.get_num_threads()),
+                "persistent_workers": True,
+                "prefetch_factor": 2
+            }
         else:
-            return {"num_workers": 0}  # MPS doesn't support pin_memory well
+            return {"num_workers": 0}  # MPS/CPU: single worker for stability
+    
+    def get_memory_info(self) -> Dict[str, float]:
+        """Get current device memory information"""
+        if self.device_name == "cuda":
+            allocated = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            total = torch.cuda.get_device_properties(0).total_memory / 1e9
+            return {
+                "allocated_gb": allocated,
+                "reserved_gb": reserved,
+                "total_gb": total,
+                "free_gb": total - reserved,
+                "utilization": (reserved / total) * 100
+            }
+        else:
+            return {"allocated_gb": 0.0, "reserved_gb": 0.0, "total_gb": 0.0, "free_gb": 0.0, "utilization": 0.0}
+    
+    def clear_cache(self):
+        """Clear device cache to free memory"""
+        if self.device_name == "cuda":
+            torch.cuda.empty_cache()
+            if self.verbose:
+                memory_info = self.get_memory_info()
+                print(f"🧹 CUDA cache cleared - Free: {memory_info['free_gb']:.1f}GB")
 
 
 # ================================
@@ -310,6 +364,11 @@ class HyperparameterTuner:
         model.train()
         total_loss = 0.0
         
+        # CUDA optimizations
+        if self.device_manager.device_name == "cuda":
+            # Enable cuDNN benchmarking for consistent input sizes
+            torch.backends.cudnn.benchmark = True
+        
         for sequences, targets in train_loader:
             sequences = self.device_manager.to_device(sequences)
             targets = self.device_manager.to_device(targets)
@@ -320,13 +379,22 @@ class HyperparameterTuner:
                 targets = targets.to(dtype=torch.float32)
             
             optimizer.zero_grad()
-            outputs = model(sequences)
             
-            # Apply appropriate loss function
-            if isinstance(criterion, nn.KLDivLoss):
-                outputs = F.log_softmax(outputs, dim=1)
+            # Use autocast for CUDA mixed precision training
+            if self.device_manager.device_name == "cuda":
+                with torch.cuda.amp.autocast():
+                    outputs = model(sequences)
+                    # Apply appropriate loss function
+                    if isinstance(criterion, nn.KLDivLoss):
+                        outputs = F.log_softmax(outputs, dim=1)
+                    loss = criterion(outputs, targets)
+            else:
+                outputs = model(sequences)
+                # Apply appropriate loss function
+                if isinstance(criterion, nn.KLDivLoss):
+                    outputs = F.log_softmax(outputs, dim=1)
+                loss = criterion(outputs, targets)
             
-            loss = criterion(outputs, targets)
             loss.backward()
             
             # Gradient clipping
@@ -389,10 +457,16 @@ class HyperparameterTuner:
                 base_channels=config['base_channels'],
                 dropout=config['dropout']
             )
-            # Move model to device and ensure proper dtype for MPS compatibility
+            # Move model to device and apply optimizations
             model = model.to(self.device_manager.device)
             if self.device_manager.device_name == "mps":
                 model = model.to(dtype=torch.float32)
+            elif self.device_manager.device_name == "cuda":
+                # CUDA optimizations
+                torch.cuda.empty_cache()  # Clear cache before training
+                # Enable cuDNN optimizations
+                torch.backends.cudnn.enabled = True
+                torch.backends.cudnn.benchmark = True
             
             # Count parameters
             param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -436,6 +510,11 @@ class HyperparameterTuner:
             
             duration = time.time() - start_time
             final_lr = optimizer.param_groups[0]['lr']
+            
+            # Clean up memory after training
+            del model, optimizer, scheduler, criterion
+            if self.device_manager.device_name == "cuda":
+                torch.cuda.empty_cache()
             
             return TuningResult(
                 config=config,
@@ -488,6 +567,11 @@ class HyperparameterTuner:
         print(f"🎯 Starting comprehensive hyperparameter optimization with {num_trials} trials...")
         random.seed(seed)
         
+        # Show initial memory state for CUDA
+        if self.device_manager.device_name == "cuda":
+            memory_info = self.device_manager.get_memory_info()
+            print(f"🖥️  Initial CUDA memory: {memory_info['free_gb']:.1f}GB free / {memory_info['total_gb']:.1f}GB total")
+        
         results = []
         for trial in range(1, num_trials + 1):
             # Sample random configuration from comprehensive search space
@@ -498,15 +582,24 @@ class HyperparameterTuner:
                 config.pop('scheduler_patience', None)
                 config.pop('scheduler_factor', None)
             
+            # Clear CUDA cache before each trial
+            if self.device_manager.device_name == "cuda":
+                self.device_manager.clear_cache()
+            
             # Evaluate configuration
             result = self.evaluate_config(config)
             results.append(result)
             
-            # Progress update
+            # Progress update with memory info
+            memory_str = ""
+            if self.device_manager.device_name == "cuda":
+                memory_info = self.device_manager.get_memory_info()
+                memory_str = f", mem={memory_info['utilization']:.1f}%"
+            
             print(f"Trial {trial:3d}/{num_trials}: "
                   f"val_loss={result.val_loss:.6f}, "
                   f"params={result.params:,}, "
-                  f"time={result.duration_s:.1f}s")
+                  f"time={result.duration_s:.1f}s{memory_str}")
             
             # Best so far every 10 trials
             if trial % 10 == 0:
@@ -514,6 +607,10 @@ class HyperparameterTuner:
                 if valid_results:
                     best = min(valid_results, key=lambda r: r.val_loss)
                     print(f"   📊 Best so far: {best.val_loss:.6f}")
+                    # Show memory status
+                    if self.device_manager.device_name == "cuda":
+                        memory_info = self.device_manager.get_memory_info()
+                        print(f"   🖥️  CUDA memory: {memory_info['utilization']:.1f}% used, {memory_info['free_gb']:.1f}GB free")
         
         return results
 

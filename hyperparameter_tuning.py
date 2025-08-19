@@ -466,7 +466,7 @@ class HyperparameterTuner:
         """Train model for one epoch with gradient accumulation support"""
         model.train()
         total_loss = 0.0
-        accumulation_steps = config.get('gradient_accumulation_steps', 1)
+        accumulation_steps = max(1, config.get('gradient_accumulation_steps', 1))  # Ensure at least 1
         
         # CUDA optimizations
         if self.device_manager.device_name == "cuda":
@@ -545,7 +545,7 @@ class HyperparameterTuner:
             optimizer.zero_grad()
             total_loss += accumulated_loss
         
-        return total_loss / len(train_loader)
+        return total_loss / max(1, len(train_loader))
     
     def validate_epoch(self, model, val_loader, criterion):
         """Validate model for one epoch"""
@@ -571,27 +571,36 @@ class HyperparameterTuner:
                 loss = criterion(outputs, targets)
                 total_loss += loss.item()
         
-        return total_loss / len(val_loader)
+        return total_loss / max(1, len(val_loader))
     
     def evaluate_config(self, config: Dict[str, Any]) -> TuningResult:
         """Evaluate a single hyperparameter configuration"""
         start_time = time.time()
         
         try:
+            # Check for empty datasets
+            if len(self.train_dataset) == 0 or len(self.val_dataset) == 0:
+                raise ValueError("Empty dataset provided - cannot train model")
+            
             # Create data loaders
             loader_kwargs = self.device_manager.get_dataloader_kwargs()
             train_loader = DataLoader(
                 self.train_dataset, 
-                batch_size=config['batch_size'], 
+                batch_size=min(config['batch_size'], len(self.train_dataset)), 
                 shuffle=True, 
                 **loader_kwargs
             )
             val_loader = DataLoader(
                 self.val_dataset, 
-                batch_size=config['batch_size'], 
+                batch_size=min(config['batch_size'], len(self.val_dataset)), 
                 shuffle=False, 
                 **loader_kwargs
             )
+            
+            # Additional safety check for empty loaders
+            if len(train_loader) == 0 or len(val_loader) == 0:
+                raise ValueError(f"Empty DataLoader created - batch_size={config['batch_size']}, "
+                               f"train_size={len(self.train_dataset)}, val_size={len(self.val_dataset)}")
             
             # Create model
             model = PromoterCNN(
@@ -812,21 +821,48 @@ def load_data(file_path: str) -> Tuple[List[str], np.ndarray]:
 def create_datasets(sequences: List[str], targets: np.ndarray, 
                    train_ratio: float = 0.8, val_ratio: float = 0.1, 
                    seed: int = 42) -> Tuple[PromoterDataset, PromoterDataset, PromoterDataset]:
-    """Create train/validation/test datasets"""
+    """Create train/validation/test datasets with safety checks"""
+    
+    # Input validation
+    if len(sequences) == 0:
+        raise ValueError("No sequences provided")
+    if len(targets) == 0:
+        raise ValueError("No targets provided")
+    if len(sequences) != len(targets):
+        raise ValueError(f"Sequence count ({len(sequences)}) doesn't match target count ({len(targets)})")
+    if len(sequences) < 10:
+        raise ValueError(f"Dataset too small ({len(sequences)} samples). Need at least 10 samples.")
+    
     # Stratify by dominant component
     labels = np.argmax(targets, axis=1)
     
-    # Train/test split
-    train_seq, test_seq, train_targets, test_targets = train_test_split(
-        sequences, targets, test_size=1-train_ratio, random_state=seed, stratify=labels
-    )
+    try:
+        # Train/test split
+        train_seq, test_seq, train_targets, test_targets = train_test_split(
+            sequences, targets, test_size=1-train_ratio, random_state=seed, stratify=labels
+        )
+        
+        # Train/validation split
+        train_labels = np.argmax(train_targets, axis=1)
+        val_size = val_ratio / train_ratio
+        train_seq, val_seq, train_targets, val_targets = train_test_split(
+            train_seq, train_targets, test_size=val_size, random_state=seed, stratify=train_labels
+        )
+    except ValueError as e:
+        print(f"⚠️  Stratified split failed: {e}")
+        print("Falling back to random split...")
+        # Fallback to random split if stratified fails
+        train_seq, test_seq, train_targets, test_targets = train_test_split(
+            sequences, targets, test_size=1-train_ratio, random_state=seed
+        )
+        val_size = val_ratio / train_ratio
+        train_seq, val_seq, train_targets, val_targets = train_test_split(
+            train_seq, train_targets, test_size=val_size, random_state=seed
+        )
     
-    # Train/validation split
-    train_labels = np.argmax(train_targets, axis=1)
-    val_size = val_ratio / train_ratio
-    train_seq, val_seq, train_targets, val_targets = train_test_split(
-        train_seq, train_targets, test_size=val_size, random_state=seed, stratify=train_labels
-    )
+    # Final validation
+    if len(train_seq) == 0 or len(val_seq) == 0 or len(test_seq) == 0:
+        raise ValueError("One of the dataset splits is empty after splitting")
     
     print(f"📊 Data splits: Train={len(train_seq)}, Val={len(val_seq)}, Test={len(test_seq)}")
     

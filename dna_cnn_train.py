@@ -1,12 +1,29 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Small-data DNA CNN trainer (CUDA + MPS)
+Fixes single-class collapse via:
+  • Stratified train/val split
+  • Class-weighted loss
+  • MixUp with soft targets (label interpolation) applied per-batch with probability --pairing-prob
+  • Robust sequence cleaning + safe augmentations
+
+Saves: model_final.pt, model_best.pt, metrics.csv and plots/ (loss, acc, error, f1, confusion matrix)
+"""
+
 import argparse, os, random, math
+from typing import Tuple
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, confusion_matrix, ConfusionMatrixDisplay
-import matplotlib.pyplot as plt
+
 
 # ---------------- Device ----------------
 def get_device():
@@ -16,7 +33,8 @@ def get_device():
         return "mps"
     return "cpu"
 
-# ---------------- IUPAC & Encoding ----------------
+
+# --------------- IUPAC encodings ---------------
 IUPAC = {
     "A":[1,0,0,0], "C":[0,1,0,0], "G":[0,0,1,0], "T":[0,0,0,1],
     "R":[0.5,0,0.5,0], "Y":[0,0.5,0,0.5], "S":[0,0.5,0.5,0],
@@ -32,31 +50,41 @@ RC_TABLE = str.maketrans({
     "B":"V","V":"B","D":"H","H":"D","N":"N"
 })
 
-def clean_seq(seq, L):
+
+def clean_seq(seq: object, L: int) -> str:
     """Coerce to uppercase IUPAC, replace unknowns with N, pad/truncate to L."""
     if not isinstance(seq, str):
-        if seq is None: s = ""
-        elif isinstance(seq, float) and math.isnan(seq): s = ""
-        else: s = str(seq)
+        if seq is None:
+            s = ""
+        elif isinstance(seq, float) and (math.isnan(seq) if hasattr(math, "isnan") else False):
+            s = ""
+        else:
+            s = str(seq)
     else:
         s = seq
     s = s.upper()
     s = "".join(ch if ch in IUPAC_KEYS else "N" for ch in s)
-    if len(s) >= L: return s[:L]
+    if len(s) >= L:
+        return s[:L]
     return s + ("N" * (L - len(s)))
 
-def rev_comp(seq):
+
+def rev_comp(seq: object) -> str:
     if not isinstance(seq, str):
-        if seq is None: s = ""
-        elif isinstance(seq, float) and math.isnan(seq): s = ""
-        else: s = str(seq)
+        if seq is None:
+            s = ""
+        elif isinstance(seq, float) and (math.isnan(seq) if hasattr(math, "isnan") else False):
+            s = ""
+        else:
+            s = str(seq)
     else:
         s = seq
     s = s.upper()
-    s = "".join(ch if ch in RC_TABLE or ch in IUPAC_KEYS else "N" for ch in s)
+    s = "".join(ch if ch in IUPAC_KEYS else "N" for ch in s)
     return s.translate(RC_TABLE)[::-1]
 
-def one_hot_mono(seq, L):
+
+def one_hot_mono(seq: str, L: int) -> np.ndarray:
     arr = np.zeros((4, L), dtype=np.float32)
     upto = min(L, len(seq))
     for i in range(upto):
@@ -64,38 +92,40 @@ def one_hot_mono(seq, L):
         arr[:, i] = v
     return arr
 
-def one_hot_dinuc(seq, L):
-    # strict dinucleotide for A/C/G/T; ambiguous pairs → zeros (safer)
+
+def one_hot_dinuc(seq: str, L: int) -> np.ndarray:
+    # Strict dinucleotide over A/C/G/T only; ambiguous pairs → zeros (safer)
     arr = np.zeros((16, L), dtype=np.float32)
     idx = {"A":0, "C":1, "G":2, "T":3}
-    upto = min(L-1, len(seq)-1)
+    upto = min(L - 1, len(seq) - 1)
     for i in range(upto):
-        a, b = seq[i], seq[i+1]
+        a, b = seq[i], seq[i + 1]
         if a in idx and b in idx:
-            arr[idx[a]*4 + idx[b], i] = 1.0
+            arr[idx[a] * 4 + idx[b], i] = 1.0
     return arr
 
-def mutate(seq, rate=0.01):
-    if rate <= 0: return seq
-    bases = ["A","C","G","T"]
+
+def mutate(seq: str, rate: float = 0.01) -> str:
+    if rate <= 0:
+        return seq
+    bases = ["A", "C", "G", "T"]
     seq = list(seq)
-    for i,ch in enumerate(seq):
+    for i, ch in enumerate(seq):
         if ch in bases and random.random() < rate:
             seq[i] = random.choice([b for b in bases if b != ch])
     return "".join(seq)
 
+
 # ---------------- Dataset ----------------
 class DNADataset(Dataset):
-    def __init__(self, df, seq_len=600, encoding="mono",
-                 augment=False, mutate_rate=0.01, rc_prob=0.5, pairing_prob=0.0):
+    def __init__(self, df: pd.DataFrame, seq_len=600, encoding="mono",
+                 augment=False, mutate_rate=0.01, rc_prob=0.5):
         self.seq_len = seq_len
         self.encoding = encoding
         self.augment = augment
         self.mutate_rate = mutate_rate
         self.rc_prob = rc_prob
-        self.pairing_prob = pairing_prob
 
-        # Clean upfront so everything is string & same length
         df = df.copy()
         df["ProSeq"] = df["ProSeq"].apply(lambda x: clean_seq(x, self.seq_len))
         if "Predicted_Component_5" in df.columns:
@@ -108,9 +138,10 @@ class DNADataset(Dataset):
         self.labels = labels.astype(int)
         self.seqs = df["ProSeq"].tolist()
 
-    def __len__(self): return len(self.seqs)
+    def __len__(self):
+        return len(self.seqs)
 
-    def _encode(self, s):
+    def _encode(self, s: str) -> torch.Tensor:
         if self.encoding == "mono":
             arr = one_hot_mono(s, self.seq_len)
         else:
@@ -118,42 +149,30 @@ class DNADataset(Dataset):
         arr = np.ascontiguousarray(arr, dtype=np.float32)
         return torch.as_tensor(arr, dtype=torch.float32)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
         s = self.seqs[idx]
         y = int(self.labels[idx])
-
         if self.augment:
             if random.random() < self.rc_prob:
                 s = rev_comp(s)
             s = mutate(s, self.mutate_rate)
-
-        x = self._encode(s)
-
-        if self.augment and self.pairing_prob > 0 and random.random() < self.pairing_prob:
-            j = random.randrange(len(self.seqs))
-            s2 = self.seqs[j]
-            if random.random() < 0.5:
-                s2 = rev_comp(s2)
-            s2 = mutate(s2, self.mutate_rate)
-            x2 = self._encode(s2)
-            alpha = random.uniform(0.3, 0.7)
-            x = alpha * x + (1 - alpha) * x2
-
+        x = self._encode(s)  # (C, L)
         return x, y
+
 
 # ---------------- Model ----------------
 class CNNClassifier(nn.Module):
-    def __init__(self, in_ch, n_classes):
+    def __init__(self, in_ch: int, n_classes: int):
         super().__init__()
         self.conv1 = nn.Conv1d(in_ch, 64, 15, padding=7)
-        self.bn1   = nn.BatchNorm1d(64)
+        self.bn1 = nn.BatchNorm1d(64)
         self.conv2 = nn.Conv1d(64, 128, 7, padding=3)
-        self.bn2   = nn.BatchNorm1d(128)
+        self.bn2 = nn.BatchNorm1d(128)
         self.conv3 = nn.Conv1d(128, 256, 3, padding=1)
-        self.bn3   = nn.BatchNorm1d(256)
-        self.drop  = nn.Dropout(0.5)
-        self.pool  = nn.AdaptiveMaxPool1d(1)
-        self.fc    = nn.Linear(256, n_classes)
+        self.bn3 = nn.BatchNorm1d(256)
+        self.drop = nn.Dropout(0.5)
+        self.pool = nn.AdaptiveMaxPool1d(1)
+        self.fc = nn.Linear(256, n_classes)
 
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
@@ -163,56 +182,127 @@ class CNNClassifier(nn.Module):
         x = self.drop(x)
         return self.fc(x)
 
+
+# ---------------- Loss / MixUp ----------------
+def soft_cross_entropy(logits: torch.Tensor,
+                       targets: torch.Tensor,
+                       class_weights: torch.Tensor = None) -> torch.Tensor:
+    """
+    Soft (probabilistic) targets CE: targets shape (B, C), sums to 1.
+    Supports optional per-class weights.
+    """
+    logp = F.log_softmax(logits, dim=1)  # (B, C)
+    if class_weights is not None:
+        # weight each class column-wise
+        logp = logp * class_weights.unsqueeze(0)
+    loss = -(targets * logp).sum(dim=1).mean()
+    return loss
+
+
+def mixup(x: torch.Tensor, y: torch.Tensor, num_classes: int, alpha: float = 0.4):
+    """Apply MixUp to a batch. Returns mixed x and soft labels (B, C)."""
+    if alpha <= 0:
+        # hard one-hot labels
+        y_onehot = F.one_hot(y, num_classes=num_classes).float()
+        return x, y_onehot, 1.0  # lam=1.0 (no mix)
+    lam = np.random.beta(alpha, alpha)
+    perm = torch.randperm(x.size(0), device=x.device)
+    x_mixed = lam * x + (1 - lam) * x[perm]
+    y_onehot = F.one_hot(y, num_classes=num_classes).float()
+    y_mixed = lam * y_onehot + (1 - lam) * y_onehot[perm]
+    return x_mixed, y_mixed, lam
+
+
+def compute_class_weights(y: np.ndarray, num_classes: int) -> torch.Tensor:
+    """Inverse-frequency class weights (sum to C)."""
+    counts = np.bincount(y, minlength=num_classes).astype(np.float32)
+    counts[counts == 0] = 1.0
+    inv = 1.0 / counts
+    w = inv * (num_classes / inv.sum())
+    return torch.tensor(w, dtype=torch.float32)
+
+
 # ---------------- Train/Eval ----------------
 def train_eval(args):
+    # Repro
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
+
     device = get_device()
     print(f"Using {device}")
 
+    # Load & stratified split
     df = pd.read_csv(args.csv)
-    ds = DNADataset(
-        df,
-        seq_len=args.seq_len,
-        encoding=args.encoding,
-        augment=args.augment,
-        mutate_rate=args.mutate_rate,
-        rc_prob=args.rc_prob,
-        pairing_prob=args.pairing_prob
+    if "Predicted_Component_5" in df.columns:
+        labels_all = df["Predicted_Component_5"].astype(int).values - 1
+    else:
+        prob_cols = [c for c in df.columns if c.endswith("_Probability")]
+        if not prob_cols:
+            raise ValueError("Need 'Predicted_Component_5' or *_Probability columns.")
+        labels_all = df[prob_cols].values.argmax(axis=1)
+
+    df_train, df_val = train_test_split(
+        df, test_size=0.2, random_state=args.seed, stratify=labels_all
     )
-    n = len(ds)
-    n_val = max(1, int(0.2 * n))
-    n_trn = n - n_val
-    train_ds, val_ds = random_split(ds, [n_trn, n_val])
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size)
+    # Datasets/loaders
+    train_ds = DNADataset(df_train, seq_len=args.seq_len, encoding=args.encoding,
+                          augment=args.augment, mutate_rate=args.mutate_rate, rc_prob=args.rc_prob)
+    val_ds   = DNADataset(df_val,   seq_len=args.seq_len, encoding=args.encoding,
+                          augment=False, mutate_rate=0.0, rc_prob=0.0)
 
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, drop_last=False)
+
+    # Model
     in_ch = 4 if args.encoding == "mono" else 16
-    n_classes = int(max(ds.labels) + 1)
+    n_classes = int(max(train_ds.labels.max(), val_ds.labels.max()) + 1)
     model = CNNClassifier(in_ch, n_classes).to(device)
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
 
+    # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
-    history = {"train_loss": [], "val_loss": [], "val_acc": [], "val_f1": []}
+    # Class weights (help against collapse)
+    class_w = compute_class_weights(train_ds.labels, n_classes).to(device)
+
+    # History
+    hist = {"train_loss": [], "val_loss": [], "val_acc": [], "val_f1": []}
     best_acc = 0.0
 
+    MIXUP_ALPHA = 0.4  # mixup magnitude (fixed); uses --pairing-prob as probability to apply MixUp
+
     for epoch in range(1, args.epochs + 1):
+        # ---- Train ----
         model.train()
         train_loss = 0.0
         for xb, yb in train_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
+            xb = xb.to(device); yb = yb.to(device)
+
+            # With probability pairing_prob, apply MixUp on this batch
+            if random.random() < args.pairing_prob:
+                xm, y_soft, _ = mixup(xb, yb, n_classes, alpha=MIXUP_ALPHA)
+                logits = model(xm)
+                loss = soft_cross_entropy(logits, y_soft, class_weights=class_w)
+            else:
+                logits = model(xb)
+                # hard labels with weights (label smoothing kept modest via soft CE hack)
+                y_onehot = F.one_hot(yb, num_classes=n_classes).float()
+                if args.label_smoothing > 0:
+                    y_onehot = (1 - args.label_smoothing) * y_onehot + args.label_smoothing / n_classes
+                loss = soft_cross_entropy(logits, y_onehot, class_weights=class_w)
+
             optimizer.zero_grad()
-            out = model(xb)
-            loss = criterion(out, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
+
         train_loss /= len(train_loader.dataset)
 
+        # ---- Validate ----
         model.eval()
         val_loss = 0.0
         correct = 0
@@ -220,24 +310,30 @@ def train_eval(args):
         all_preds, all_labels = [], []
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb = xb.to(device)
-                yb = yb.to(device)
-                out = model(xb)
-                loss = criterion(out, yb)
+                xb = xb.to(device); yb = yb.to(device)
+                logits = model(xb)
+
+                # Validation uses hard labels
+                y_onehot = F.one_hot(yb, num_classes=n_classes).float()
+                if args.label_smoothing > 0:
+                    y_onehot = (1 - args.label_smoothing) * y_onehot + args.label_smoothing / n_classes
+                loss = soft_cross_entropy(logits, y_onehot, class_weights=class_w)
+
                 val_loss += loss.item() * xb.size(0)
-                preds = out.argmax(1)
+                preds = logits.argmax(1)
                 correct += (preds == yb).sum().item()
                 total += yb.size(0)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(yb.cpu().tolist())
+
         val_loss /= len(val_loader.dataset)
         acc = correct / total if total else 0.0
         f1 = f1_score(all_labels, all_preds, average="macro") if total else 0.0
 
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["val_acc"].append(acc)
-        history["val_f1"].append(f1)
+        hist["train_loss"].append(train_loss)
+        hist["val_loss"].append(val_loss)
+        hist["val_acc"].append(acc)
+        hist["val_f1"].append(f1)
 
         if acc > best_acc:
             best_acc = acc
@@ -246,46 +342,49 @@ def train_eval(args):
         if epoch % 10 == 0 or epoch == 1:
             print(f"Epoch {epoch}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  acc={acc:.3f}  f1={f1:.3f}")
 
-    # Save final model and metrics
+    # Save final model + metrics
     torch.save(model.state_dict(), "model_final.pt")
-    pd.DataFrame(history).to_csv("metrics.csv", index=False)
+    pd.DataFrame(hist).to_csv("metrics.csv", index=False)
 
     # Plots
     os.makedirs("plots", exist_ok=True)
-    plt.plot(history["train_loss"], label="train"); plt.plot(history["val_loss"], label="val")
+    plt.plot(hist["train_loss"], label="train"); plt.plot(hist["val_loss"], label="val")
     plt.legend(); plt.title("Loss"); plt.savefig("plots/loss.png"); plt.close()
 
-    plt.plot(history["val_acc"]); plt.title("Val Accuracy"); plt.savefig("plots/acc.png"); plt.close()
-    plt.plot([1 - a for a in history["val_acc"]]); plt.title("Error Rate"); plt.savefig("plots/error.png"); plt.close()
-    plt.plot(history["val_f1"]); plt.title("Macro F1"); plt.savefig("plots/f1.png"); plt.close()
+    plt.plot(hist["val_acc"]); plt.title("Val Accuracy"); plt.savefig("plots/acc.png"); plt.close()
+    plt.plot([1 - a for a in hist["val_acc"]]); plt.title("Error Rate"); plt.savefig("plots/error.png"); plt.close()
+    plt.plot(hist["val_f1"]); plt.title("Macro F1"); plt.savefig("plots/f1.png"); plt.close()
 
     if len(all_labels) and len(all_preds):
-        cm = confusion_matrix(all_labels, all_preds)
+        cm = confusion_matrix(all_labels, all_preds, labels=list(range(n_classes)))
         disp = ConfusionMatrixDisplay(cm)
         disp.plot()
         plt.title("Confusion Matrix (val)")
         plt.savefig("plots/confusion_matrix.png")
         plt.close()
 
+    print(f"[DONE] best_val_acc={best_acc:.4f}  Metrics saved to metrics.csv; plots in ./plots")
+
+
+
 if __name__ == "__main__":
+    # Your requested defaults (with increased epochs/LR, stronger weight decay; no early stopping)
     p = argparse.ArgumentParser()
     p.add_argument("--csv", type=str, default="data/processed/ProSeq_with_5component_analysis.csv",
                    help="Path to CSV with columns: ProSeq, Predicted_Component_5")
-    p.add_argument("--epochs", type=int, default=200)                 # increased
+    p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--seq-len", type=int, default=600, help="Pad/truncate length")
     p.add_argument("--encoding", type=str, default="mono", choices=["mono", "dinuc"])
-    p.add_argument("--augment", action="store_true", default=True)    # default True
+    p.add_argument("--augment", action="store_true", default=True)
     p.add_argument("--mutate-rate", type=float, default=0.015)
     p.add_argument("--rc-prob", type=float, default=0.5)
-    p.add_argument("--pairing-prob", type=float, default=0.3)
-    p.add_argument("--loss", type=str, default="hybrid",
-                   choices=["crossentropy", "focal", "cosine_ce", "triplet", "hybrid"])
+    p.add_argument("--pairing-prob", type=float, default=0.3)  # used as MixUp probability per batch
+    p.add_argument("--loss", type=str, default="hybrid", choices=["crossentropy", "focal", "cosine_ce", "triplet", "hybrid"])  # kept for compatibility; CE used
     p.add_argument("--label-smoothing", type=float, default=0.05)
-    p.add_argument("--lr", type=float, default=3e-3)                  # increased
-    p.add_argument("--weight-decay", type=float, default=1e-3)        # stronger regularization
+    p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-3)
+    p.add_argument("--patience", type=int, default=8, help="Unused (no early stopping)")  # kept for compatibility
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
     train_eval(args)

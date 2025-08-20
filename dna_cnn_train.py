@@ -571,7 +571,7 @@ def main():
         criterion_triplet = lambda emb, y: batch_semihard_triplet_loss(emb, y, margin=0.2)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     best_acc = 0.0
     best_path = "model_best.pt"

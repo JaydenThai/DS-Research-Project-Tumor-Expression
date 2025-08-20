@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DNA CNN for ~8k samples (CUDA/MPS/CPU)
-- Compact CNN for motif discovery (600bp)
-- Robust IUPAC cleaning
-- Losses: ce | focal | weighted_ce | balanced_ce | ldam | logit_adj
-- AdamW + cosine warmup, grad clip, RC-TTA on val (mono)
-- No early stopping; minimal logs
-- Saves: model_best.pt, model_final.pt, metrics.csv, plots/
+DNA CNN with Hyperparameter Tuning and Advanced Analysis (v2 - Patched)
+
+- Fix for DataLoader collation error (numpy.int64 issue).
+- Hyperparameter tuning using Optuna for lr, weight decay, dropout, loss, and batch size.
+- Advanced CNN (DeepMotifCNN) with multi-scale kernels, residual connections, and attention.
+- Professional-quality visualizations using Seaborn.
+- Comprehensive final analysis report.
+- Fully compatible with CUDA, MPS, and CPU.
+- Saves results for each trial and a copy of the best trial's results.
 """
 
-import argparse, os, random, math
-from typing import Tuple
+import argparse, os, random, math, shutil
+from typing import Tuple, Dict
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 import torch
 import torch.nn as nn
@@ -22,6 +25,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, confusion_matrix, ConfusionMatrixDisplay, classification_report
+
+import optuna
 
 # ---------------- Device ----------------
 def get_device():
@@ -31,376 +36,250 @@ def get_device():
 
 # ---------------- IUPAC & helpers ----------------
 IUPAC = {
-    "A":[1,0,0,0], "C":[0,1,0,0], "G":[0,0,1,0], "T":[0,0,0,1],
-    "R":[0.5,0,0.5,0], "Y":[0,0.5,0,0.5], "S":[0,0.5,0.5,0],
-    "W":[0.5,0,0,0.5], "K":[0,0,0.5,0.5], "M":[0.5,0.5,0,0],
-    "B":[0,1/3,1/3,1/3], "D":[1/3,0,1/3,1/3], "H":[1/3,1/3,0,1/3],
-    "V":[1/3,1/3,1/3,0], "N":[0.25,0.25,0.25,0.25]
+    "A":[1,0,0,0], "C":[0,1,0,0], "G":[0,0,1,0], "T":[0,0,0,1], "N":[0.25,0.25,0.25,0.25],
+    "R":[0.5,0,0.5,0], "Y":[0,0.5,0,0.5], "S":[0,0.5,0.5,0], "W":[0.5,0,0,0.5],
+    "K":[0,0,0.5,0.5], "M":[0.5,0.5,0,0], "B":[0,1/3,1/3,1/3], "D":[1/3,0,1/3,1/3],
+    "H":[1/3,1/3,0,1/3], "V":[1/3,1/3,1/3,0]
 }
 IUPAC_KEYS = set(IUPAC.keys())
-RC_TABLE = str.maketrans({
-    "A":"T","C":"G","G":"C","T":"A",
-    "R":"Y","Y":"R","S":"S","W":"W","K":"M","M":"K",
-    "B":"V","V":"B","D":"H","H":"D","N":"N"
-})
+RC_TABLE = str.maketrans({"A":"T","C":"G","G":"C","T":"A","N":"N","R":"Y","Y":"R","S":"S","W":"W","K":"M","M":"K","B":"V","V":"B","D":"H","H":"D"})
 
 def clean_seq(seq: object, L: int) -> str:
-    if not isinstance(seq, str):
-        if seq is None: s = ""
-        elif isinstance(seq, float) and (math.isnan(seq) if hasattr(math, "isnan") else False): s = ""
-        else: s = str(seq)
-    else:
-        s = seq
-    s = s.upper()
-    s = "".join(ch if ch in IUPAC_KEYS else "N" for ch in s)
-    return s[:L] if len(s) >= L else s + ("N" * (L - len(s)))
+    s = str(seq).upper() if seq is not None and not (isinstance(seq, float) and math.isnan(seq)) else ""
+    s = "".join(c if c in IUPAC_KEYS else "N" for c in s)
+    return s.ljust(L, "N")[:L]
 
 def rev_comp_str(seq: str) -> str:
-    s = "".join(ch if ch in IUPAC_KEYS else "N" for ch in seq.upper())
-    return s.translate(RC_TABLE)[::-1]
-
-def mutate(seq: str, rate: float = 0.01) -> str:
-    if rate <= 0: return seq
-    bases = ["A","C","G","T"]
-    seq = list(seq)
-    for i,ch in enumerate(seq):
-        if ch in bases and random.random() < rate:
-            seq[i] = random.choice([b for b in bases if b != ch])
-    return "".join(seq)
+    return seq.translate(RC_TABLE)[::-1]
 
 def one_hot_mono(seq: str, L: int) -> np.ndarray:
-    arr = np.zeros((4,L), dtype=np.float32)
-    upto = min(L, len(seq))
-    for i in range(upto):
-        arr[:, i] = IUPAC.get(seq[i], IUPAC["N"])
-    return arr
-
-def one_hot_dinuc(seq: str, L: int) -> np.ndarray:
-    arr = np.zeros((16,L), dtype=np.float32)
-    idx = {"A":0,"C":1,"G":2,"T":3}
-    upto = min(L-1, len(seq)-1)
-    for i in range(upto):
-        a,b = seq[i],seq[i+1]
-        if a in idx and b in idx:
-            arr[idx[a]*4+idx[b], i] = 1.0
+    arr = np.zeros((4, L), dtype=np.float32)
+    for i, c in enumerate(seq[:L]):
+        arr[:, i] = IUPAC.get(c, IUPAC["N"])[:4] # Use first 4 elements for ACGT
     return arr
 
 # ---------------- Dataset ----------------
 class DNADataset(Dataset):
-    def __init__(self, df: pd.DataFrame, seq_len=600, encoding="mono",
-                 augment=False, mutate_rate=0.005, rc_prob=0.5):
-        self.seq_len=seq_len; self.encoding=encoding
-        self.augment=augment; self.mutate_rate=mutate_rate; self.rc_prob=rc_prob
-
-        df = df.copy()
+    def __init__(self, df: pd.DataFrame, seq_len=600, augment=False, rc_prob=0.5):
+        self.seq_len, self.augment, self.rc_prob = seq_len, augment, rc_prob
         df["ProSeq"] = df["ProSeq"].apply(lambda x: clean_seq(x, self.seq_len))
         if "Predicted_Component_5" in df.columns:
             labels = df["Predicted_Component_5"].astype(int).values - 1
         else:
             prob_cols = [c for c in df.columns if c.endswith("_Probability")]
-            if not prob_cols: raise ValueError("Need Predicted_Component_5 or *_Probability.")
-            labels = df[prob_cols].values.argmax(axis=1)
-        self.labels = labels.astype(int)
-        self.seqs = df["ProSeq"].tolist()
+            labels = df[prob_cols].values.argmax(axis=1) if prob_cols else np.zeros(len(df))
+        self.labels, self.seqs = labels.astype(int), df["ProSeq"].tolist()
 
     def __len__(self): return len(self.seqs)
-
-    def _encode(self, s: str) -> torch.Tensor:
-        if self.encoding=="mono": arr = one_hot_mono(s, self.seq_len)
-        else:                      arr = one_hot_dinuc(s, self.seq_len)
-        arr = np.ascontiguousarray(arr, dtype=np.float32)
-        return torch.as_tensor(arr, dtype=torch.float32)
-
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        s = self.seqs[idx]; y = int(self.labels[idx])
-        if self.augment:
-            if random.random() < self.rc_prob: s = rev_comp_str(s)
-            s = mutate(s, self.mutate_rate)
-        x = self._encode(s)
-        return x, y
+        s, y = self.seqs[idx], self.labels[idx]
+        if self.augment and random.random() < self.rc_prob: s = rev_comp_str(s)
+        x = torch.as_tensor(one_hot_mono(s, self.seq_len), dtype=torch.float32)
+        # FIX: Explicitly cast the label to a standard Python int to prevent collation errors.
+        return x, int(y)
 
-# ---------------- Model ----------------
-### CHANGED: Replaced SmallDNACNN with RobustDNACNN
-class RobustDNACNN(nn.Module):
-    """
-    A more robust CNN with MaxPooling and increased Dropout to combat overfitting.
-    It learns features hierarchically and is less sensitive to motif position.
-    """
-    def __init__(self, in_ch: int, n_classes: int, p_drop: float = 0.4):
+# ---------------- Model: DeepMotifCNN ----------------
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=4):
         super().__init__()
-        
-        # Block 1: Capture initial motifs (600bp -> 200bp)
-        self.conv_block1 = nn.Sequential(
-            nn.Conv1d(in_ch, 64, kernel_size=19, padding=9), # Wider kernel
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=3),
-            nn.Dropout(p_drop)
-        )
-        
-        # Block 2: Learn combinations of motifs (200bp -> 50bp)
-        self.conv_block2 = nn.Sequential(
-            nn.Conv1d(64, 96, kernel_size=7, padding=3),
-            nn.BatchNorm1d(96),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=4),
-            nn.Dropout(p_drop)
-        )
-        
-        # Block 3: Higher-level features (50bp -> 12bp)
-        self.conv_block3 = nn.Sequential(
-            nn.Conv1d(96, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=4),
-            nn.Dropout(p_drop)
-        )
-        
-        # Global pooling and classifier
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(128, n_classes)
-
+        self.squeeze = nn.AdaptiveAvgPool1d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction), nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels), nn.Sigmoid())
     def forward(self, x):
-        x = self.conv_block1(x)
-        x = self.conv_block2(x)
-        x = self.conv_block3(x)
-        x = self.pool(x).squeeze(-1) # Squeeze the length dimension
-        return self.fc(x)
+        b, c, _ = x.shape
+        y = self.squeeze(x).view(b, c)
+        y = self.excitation(y).view(b, c, 1)
+        return x * y
 
-# ---------------- Losses ----------------
-class BalancedSoftmaxCE(nn.Module):
-    """Ren et al. Balanced Softmax: softmax(logits + log N_c)."""
-    def __init__(self, cls_counts: torch.Tensor):
+class MultiScaleResidualSEBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, p_drop):
         super().__init__()
-        self.register_buffer("log_counts", torch.log(torch.clamp(cls_counts.float(), min=1.0)))
-    def forward(self, logits: torch.Tensor, target: torch.Tensor):
-        return F.cross_entropy(logits + self.log_counts.unsqueeze(0), target)
+        branch_ch = out_ch // 3
+        self.convs = nn.ModuleList([
+            nn.Conv1d(in_ch, branch_ch, kernel_size=3, padding=1),
+            nn.Conv1d(in_ch, branch_ch, kernel_size=7, padding=3),
+            nn.Conv1d(in_ch, branch_ch, kernel_size=11, padding=5)])
+        self.merge = nn.Sequential(nn.BatchNorm1d(out_ch), nn.ReLU(inplace=True), nn.Dropout(p_drop))
+        self.se = SEBlock(out_ch)
+        self.shortcut = nn.Conv1d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
+    def forward(self, x):
+        res_path = self.shortcut(x)
+        x_cat = torch.cat([conv(x) for conv in self.convs], dim=1)
+        return F.relu(self.se(self.merge(x_cat)) + res_path)
 
-class LDAMLoss(nn.Module):
-    """Cao et al. LDAM margin loss (no DRW for simplicity)."""
-    def __init__(self, cls_counts: torch.Tensor, max_m: float=0.5, scale: float=30.0):
+class DeepMotifCNN(nn.Module):
+    def __init__(self, in_ch: int, n_classes: int, p_drop: float):
         super().__init__()
-        n = cls_counts.float().clamp(min=1.0)
-        m_list = 1.0 / torch.sqrt(torch.sqrt(n))
-        m_list = m_list * (max_m / m_list.max())
-        self.register_buffer("m_list", m_list); self.s = scale
-    def forward(self, logits: torch.Tensor, target: torch.Tensor):
-        index = torch.zeros_like(logits, dtype=torch.bool)
-        index.scatter_(1, target.view(-1,1), True)
-        adjusted = logits.clone()
-        adjusted[index] -= self.m_list[target]
-        return F.cross_entropy(self.s * adjusted, target)
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_ch, 48, kernel_size=15, padding=7), nn.BatchNorm1d(48),
+            nn.ReLU(inplace=True), nn.MaxPool1d(3))
+        self.block1 = MultiScaleResidualSEBlock(48, 96, p_drop)
+        self.pool1 = nn.MaxPool1d(4)
+        self.block2 = MultiScaleResidualSEBlock(96, 120, p_drop)
+        self.pool2 = nn.MaxPool1d(4)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1), nn.Flatten(), nn.Linear(120, 64),
+            nn.ReLU(inplace=True), nn.Dropout(p_drop + 0.1), nn.Linear(64, n_classes))
+    def forward(self, x):
+        return self.head(self.pool2(self.block2(self.pool1(self.block1(self.stem(x))))))
 
-class LogitAdjustedCE(nn.Module):
-    """Menon et al. Logit-adjusted CE: logits + tau * log p(y)."""
-    def __init__(self, cls_counts: torch.Tensor, tau: float=1.0):
-        super().__init__()
-        p = torch.clamp(cls_counts.float(), min=1.0); p = p / p.sum()
-        self.register_buffer("bias", tau * torch.log(p))
-    def forward(self, logits: torch.Tensor, target: torch.Tensor):
-        return F.cross_entropy(logits + self.bias.unsqueeze(0), target)
-
+# ---------------- Losses & RC TTA ----------------
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=None, label_smoothing=0.0):
-        super().__init__()
-        self.gamma = gamma; self.alpha = alpha; self.label_smoothing = label_smoothing
+    def __init__(self, gamma=2.0): super().__init__(); self.gamma = gamma
     def forward(self, logits, target):
-        ce = F.cross_entropy(logits, target, reduction='none',
-                             label_smoothing=self.label_smoothing)
-        pt = torch.exp(-ce)
-        if self.alpha is not None:
-            at = self.alpha.gather(0, target)
-            loss = at * (1 - pt) ** self.gamma * ce
-        else:
-            loss = (1 - pt) ** self.gamma * ce
+        ce = F.cross_entropy(logits, target, reduction='none')
+        pt, loss = torch.exp(-ce), (1 - pt) ** self.gamma * ce
         return loss.mean()
 
-def class_weighted_ce(cls_counts: torch.Tensor, label_smoothing: float = 0.0):
+def class_weighted_ce(cls_counts, device):
     w = 1.0 / torch.clamp(cls_counts.float(), min=1.0)
-    w = w / w.mean()
-    return lambda logits, target: F.cross_entropy(logits, target, weight=w.to(logits.device),
-                                                  label_smoothing=label_smoothing)
+    w = (w / w.mean()).to(device)
+    return nn.CrossEntropyLoss(weight=w)
 
-# ---------------- RC TTA for mono ----------------
-def rc_onehot_mono(x: torch.Tensor) -> torch.Tensor:
-    """x: (B,4,L) -> reverse complement in one-hot mono space."""
-    x_rc = x.clone()
-    x_rc[:,0,:], x_rc[:,3,:] = x[:,3,:], x[:,0,:]  # A<->T
-    x_rc[:,1,:], x_rc[:,2,:] = x[:,2,:], x[:,1,:]  # C<->G
-    x_rc = torch.flip(x_rc, dims=[2])
-    return x_rc
+def rc_onehot_mono(x): return torch.flip(x, dims=[1, 2])
 
-# ---------------- Train/Eval ----------------
-def train_eval(args):
-    # Repro
-    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(args.seed)
-    device = get_device()
-    print(f"Using {device}")
+# ---------------- Visualization ----------------
+def generate_plots(history_df, cm, n_classes, out_dir):
+    sns.set_theme(style="whitegrid")
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Training & Validation Metrics', fontsize=20)
+    
+    best_epoch = history_df['val_loss'].idxmin()
+    axes[0, 0].plot(history_df['train_loss'], label='Train Loss', lw=2)
+    axes[0, 0].plot(history_df['val_loss'], label='Validation Loss', lw=2)
+    axes[0, 0].axvline(x=best_epoch, color='r', linestyle='--', label=f'Best Epoch: {best_epoch+1}')
+    axes[0, 0].set_title('Model Loss', fontsize=14); axes[0, 0].set_xlabel('Epochs'); axes[0, 0].set_ylabel('Loss'); axes[0, 0].legend()
+    
+    axes[0, 1].plot(history_df['val_acc'], label='Validation Accuracy', color='green', lw=2)
+    axes[0, 1].set_title('Validation Accuracy', fontsize=14); axes[0, 1].set_xlabel('Epochs'); axes[0, 1].set_ylabel('Accuracy')
+    
+    axes[1, 0].plot(history_df['val_f1'], label='Validation Macro F1', color='purple', lw=2)
+    axes[1, 0].set_title('Validation Macro F1 Score', fontsize=14); axes[1, 0].set_xlabel('Epochs'); axes[1, 0].set_ylabel('F1 Score')
 
-    # Load & stratified split on labels
-    df = pd.read_csv(args.csv)
-    if "Predicted_Component_5" in df.columns:
-        labels_all = df["Predicted_Component_5"].astype(int).values - 1
-    else:
-        prob_cols = [c for c in df.columns if c.endswith("_Probability")]
-        if not prob_cols: raise ValueError("Need Predicted_Component_5 or *_Probability.")
-        labels_all = df[prob_cols].values.argmax(axis=1)
-    cls_counts_all = np.bincount(labels_all, minlength=int(labels_all.max()+1))
-    print("Class distribution (all):", cls_counts_all.tolist())
+    axes[1, 1].plot(1 - history_df['val_acc'], label='Validation Error Rate', color='orange', lw=2)
+    axes[1, 1].set_title('Validation Error Rate', fontsize=14); axes[1, 1].set_xlabel('Epochs'); axes[1, 1].set_ylabel('Error Rate')
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.savefig(os.path.join(out_dir, "metrics_dashboard.png")); plt.close()
 
-    df_tr, df_va = train_test_split(df, test_size=0.2, random_state=args.seed, stratify=labels_all)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    disp = ConfusionMatrixDisplay(cm, display_labels=list(range(n_classes)))
+    disp.plot(cmap=plt.cm.Blues, ax=ax, values_format='d')
+    ax.set_title('Validation Confusion Matrix', fontsize=16); plt.savefig(os.path.join(out_dir, "confusion_matrix.png")); plt.close()
 
-    train_ds = DNADataset(df_tr, seq_len=args.seq_len, encoding=args.encoding,
-                          augment=args.augment, mutate_rate=args.mutate_rate, rc_prob=args.rc_prob)
-    val_ds   = DNADataset(df_va, seq_len=args.seq_len, encoding=args.encoding,
-                          augment=False, mutate_rate=0.0, rc_prob=0.0)
+# ---------------- Training Function for One Trial ----------------
+def run_training_trial(params: Dict, trial_num: int, is_best_trial: bool = False):
+    out_dir = f"results/trial_{trial_num}"
+    os.makedirs(out_dir, exist_ok=True)
+    
+    device, seed = get_device(), 42
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
-    val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=False)
+    df = pd.read_csv(params['csv'])
+    labels_all = df["Predicted_Component_5"].astype(int).values - 1
+    df_tr, df_va = train_test_split(df, test_size=0.2, random_state=seed, stratify=labels_all)
+    
+    train_ds = DNADataset(df_tr, seq_len=params['seq_len'], augment=True)
+    val_ds = DNADataset(df_va, seq_len=params['seq_len'])
+    
+    train_loader = DataLoader(train_ds, batch_size=params['batch_size'], shuffle=True, drop_last=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=params['batch_size'], shuffle=False, num_workers=2, pin_memory=True)
 
-    in_ch = 4 if args.encoding=="mono" else 16
-    n_classes = int(max(train_ds.labels.max(), val_ds.labels.max()) + 1)
+    n_classes = int(labels_all.max() + 1)
+    cls_counts = torch.tensor(np.bincount(train_ds.labels, minlength=n_classes))
 
-    # Class counts from train set
-    cls_counts = torch.tensor(np.bincount(train_ds.labels, minlength=n_classes), dtype=torch.float32)
-    print("Class distribution (train):", cls_counts.cpu().numpy().astype(int).tolist())
+    model = DeepMotifCNN(4, n_classes, p_drop=params['dropout']).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=params['epochs'] * len(train_loader))
+    criterion = FocalLoss() if params['loss'] == 'focal' else class_weighted_ce(cls_counts, device)
+    
+    history = {"train_loss": [], "val_loss": [], "val_acc": [], "val_f1": []}
+    best_acc, best_metrics = 0.0, None
 
-    # Model
-    ### CHANGED: Using the new, more robust model architecture
-    model = RobustDNACNN(in_ch, n_classes, p_drop=0.4).to(device)
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs")
-        model = nn.DataParallel(model)
-    print(model) # Print model architecture
-
-    # Optimizer & scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-    total_steps = args.epochs * max(1, len(train_loader))
-    warmup_steps = max(1, int(0.05 * total_steps))
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return float(step) / float(max(1, warmup_steps))
-        progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    # Select loss
-    lname = args.loss.lower()
-    if lname == "balanced_ce":
-        criterion = BalancedSoftmaxCE(cls_counts.to(device))
-    elif lname == "ldam":
-        criterion = LDAMLoss(cls_counts.to(device), max_m=0.5, scale=30.0)
-    elif lname == "logit_adj":
-        criterion = LogitAdjustedCE(cls_counts.to(device), tau=1.0)
-    elif lname == "focal":
-        criterion = FocalLoss(gamma=2.0, alpha=None, label_smoothing=args.label_smoothing)
-    elif lname == "weighted_ce":
-        criterion = class_weighted_ce(cls_counts.to(device), label_smoothing=args.label_smoothing)
-    else:
-        criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
-
-    # History
-    hist = {"train_loss":[], "val_loss":[], "val_acc":[], "val_f1":[]}
-    best_acc = 0.0
-
-    global_step = 0
-    for epoch in range(1, args.epochs+1):
-        # ---- Train ----
+    for epoch in range(1, params['epochs'] + 1):
         model.train()
-        train_loss = 0.0
+        train_loss_epoch = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
+            logits, loss = model(xb), criterion(model(xb), yb)
+            optimizer.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.5)
+            optimizer.step(); scheduler.step()
+            train_loss_epoch += loss.item()
+        history['train_loss'].append(train_loss_epoch / len(train_loader))
 
-            logits = model(xb)
-            loss = criterion(logits, yb)
-
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-            optimizer.step()
-            scheduler.step(); global_step += 1
-
-            train_loss += loss.item() * xb.size(0)
-        train_loss /= len(train_loader.dataset)
-
-        # ---- Validate (RC TTA for mono) ----
         model.eval()
-        val_loss, correct, total = 0.0, 0, 0
+        val_loss_epoch, correct, total = 0.0, 0, 0
         all_preds, all_labels = [], []
         with torch.no_grad():
             for xb, yb in val_loader:
-                xb = xb.to(device); yb = yb.to(device)
-                if args.encoding == "mono" and args.rc_tta:
-                    logits_f = model(xb)
-                    logits_r = model(rc_onehot_mono(xb))
-                    logits = 0.5 * (logits_f + logits_r)
-                else:
-                    logits = model(xb)
+                xb, yb = xb.to(device), yb.to(device)
+                logits = 0.5 * (model(xb) + model(rc_onehot_mono(xb))) if params['rc_tta'] else model(xb)
                 loss = criterion(logits, yb)
-                val_loss += loss.item() * xb.size(0)
+                val_loss_epoch += loss.item()
                 preds = logits.argmax(1)
                 correct += (preds == yb).sum().item(); total += yb.size(0)
-                all_preds.extend(preds.cpu().tolist()); all_labels.extend(yb.cpu().tolist())
+                all_preds.extend(preds.cpu().numpy()); all_labels.extend(yb.cpu().numpy())
 
-        val_loss /= len(val_loader.dataset)
-        acc = correct/total if total else 0.0
-        f1 = f1_score(all_labels, all_preds, average="macro") if total else 0.0
-
-        hist["train_loss"].append(train_loss); hist["val_loss"].append(val_loss)
-        hist["val_acc"].append(acc); hist["val_f1"].append(f1)
-
-        # ### NOTE: No early stopping, but we still save the best model seen so far.
+        acc = correct / total
+        history['val_loss'].append(val_loss_epoch / len(val_loader))
+        history['val_acc'].append(acc)
+        history['val_f1'].append(f1_score(all_labels, all_preds, average="macro", zero_division=0))
+        
         if acc > best_acc:
             best_acc = acc
-            torch.save(model.state_dict(), "model_best.pt")
+            torch.save(model.state_dict(), os.path.join(out_dir, "model_best.pt"))
+            best_metrics = {
+                'cm': confusion_matrix(all_labels, all_preds, labels=list(range(n_classes))),
+                'report': classification_report(all_labels, all_preds, digits=4, zero_division=0, target_names=[f"Class {i}" for i in range(n_classes)])
+            }
+        
+        if epoch % 20 == 0 or epoch == 1: print(f"Trial {trial_num}, Epoch {epoch:3d}/{params['epochs']} | Val Acc: {acc:.4f} | Best Acc: {best_acc:.4f}")
 
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch {epoch}/{args.epochs}  lr={scheduler.get_last_lr()[0]:.2e}  "
-                  f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  acc={acc:.3f}  f1={f1:.3f}")
+    torch.save(model.state_dict(), os.path.join(out_dir, "model_final.pt"))
+    pd.DataFrame(history).to_csv(os.path.join(out_dir, "metrics.csv"), index=False)
+    if best_metrics:
+        generate_plots(pd.DataFrame(history), best_metrics['cm'], n_classes, out_dir)
+        with open(os.path.join(out_dir, "class_report.txt"), "w") as f: f.write(best_metrics['report'])
 
-    # Save final + metrics
-    torch.save(model.state_dict(), "model_final.pt")
-    pd.DataFrame(hist).to_csv("metrics.csv", index=False)
+    if is_best_trial: shutil.copytree(out_dir, "results/best_trial", dirs_exist_ok=True)
+        
+    return best_acc
 
-    # Plots
-    os.makedirs("plots", exist_ok=True)
-    plt.plot(hist["train_loss"], label="train"); plt.plot(hist["val_loss"], label="val")
-    plt.legend(); plt.title("Loss"); plt.savefig("plots/loss.png"); plt.close()
-    plt.plot(hist["val_acc"]); plt.title("Val Accuracy"); plt.savefig("plots/acc.png"); plt.close()
-    plt.plot([1-a for a in hist["val_acc"]]); plt.title("Error Rate"); plt.savefig("plots/error.png"); plt.close()
-    plt.plot(hist["val_f1"]); plt.title("Macro F1"); plt.savefig("plots/f1.png"); plt.close()
+# ---------------- Optuna Objective Function ----------------
+def objective(trial: optuna.trial.Trial):
+    params = {
+        'lr': trial.suggest_float('lr', 1e-5, 1e-3, log=True),
+        'weight_decay': trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True),
+        'dropout': trial.suggest_float('dropout', 0.2, 0.5),
+        'loss': trial.suggest_categorical('loss', ['weighted_ce', 'focal']),
+        'batch_size': trial.suggest_categorical('batch_size', [32, 64]),
+        'csv': "data/processed/ProSeq_with_5component_analysis.csv", 'epochs': 200, 'seq_len': 600, 'rc_tta': True
+    }
+    print(f"\n--- Starting Trial {trial.number} with params: { {k:v for k,v in params.items() if k not in ['csv', 'epochs', 'seq_len', 'rc_tta']} } ---")
+    return run_training_trial(params, trial_num=trial.number)
 
-    if len(all_labels) and len(all_preds):
-        cm = confusion_matrix(all_labels, all_preds, labels=list(range(n_classes)))
-        disp = ConfusionMatrixDisplay(cm); disp.plot()
-        plt.title("Confusion Matrix (val)"); plt.savefig("plots/confusion_matrix.png"); plt.close()
-        # Per-class report
-        with open("class_report.txt","w") as f:
-            f.write(classification_report(all_labels, all_preds, digits=4))
-
-    print(f"[DONE] best_val_acc={best_acc:.4f}  metrics.csv + plots/ saved.")
-
-# ---------------- Main ----------------
+# ---------------- Main Execution ----------------
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--csv", type=str, default="data/processed/ProSeq_with_5component_analysis.csv",
-                   help="Path to CSV with columns: ProSeq, Predicted_Component_5")
-    p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--seq-len", type=int, default=600, help="Pad/truncate length")
-    p.add_argument("--encoding", type=str, default="mono", choices=["mono", "dinuc"])
-    p.add_argument("--augment", action="store_true", default=True)
-    p.add_argument("--mutate-rate", type=float, default=0.005)
-    p.add_argument("--rc-prob", type=float, default=0.5)
-    p.add_argument("--loss", type=str, default="weighted_ce",
-                   choices=["ce","focal","weighted_ce","balanced_ce","ldam","logit_adj"])
-    p.add_argument("--label-smoothing", type=float, default=0.0)
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--weight-decay", type=float, default=5e-4)
-    p.add_argument("--rc-tta", action="store_true", default=True, help="Reverse-complement TTA (mono only)")
-    p.add_argument("--seed", type=int, default=42)
-    ### REMOVED: --pairing-prob, as it was unused in the original script.
-    args = p.parse_args()
-    train_eval(args)
+    parser = argparse.ArgumentParser(description="Advanced DNA CNN Training with Hyperparameter Tuning")
+    parser.add_argument("--n-trials", type=int, default=25, help="Number of Optuna tuning trials.")
+    args = parser.parse_args()
+
+    if os.path.exists("results"): shutil.rmtree("results")
+
+    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+    study.optimize(objective, n_trials=args.n_trials, timeout=7200)
+    
+    print("\n\n" + "="*80 + "\n" + " " * 25 + "HYPERPARAMETER TUNING COMPLETE\n" + "="*80)
+    
+    best_trial = study.best_trial
+    print(f"Total trials: {len(study.trials)}\nBest trial number: {best_trial.number}\nBest Validation Accuracy: {best_trial.value:.4f}\n")
+    print("--- Optimal Hyperparameters ---"); [print(f"{k:>15}: {v}") for k, v in best_trial.params.items()]; print("-" * 33)
+
+    print("\nSaving artifacts from the best trial to 'results/best_trial/'...")
+    best_params = best_trial.params.copy()
+    best_params.update({'csv': "data/processed/ProSeq_with_5component_analysis.csv", 'epochs': 200, 'seq_len': 600, 'rc_tta': True})
+    run_training_trial(best_params, trial_num="best_final", is_best_trial=True)
+    

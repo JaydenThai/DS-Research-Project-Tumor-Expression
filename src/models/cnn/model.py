@@ -1,85 +1,127 @@
+# models_promoter_cnn.py
+# -*- coding: utf-8 -*-
+"""
+Lightweight CNN models for promoter sequence classification.
+
+This module provides two architectures with identical public APIs to the user's originals,
+but refactored internally for better training stability and to reduce mode collapse
+(always predicting one class).
+
+Classes
+-------
+- PromoterCNN: single-stream CNN with BN, gentler downsampling, and a slightly richer head.
+- MultiKernelCNN: three-branch CNN (k=7/9/11) with BN and consistent padding.
+
+Both expect inputs shaped (batch_size, 5, sequence_length) where channels correspond to
+[A, T, G, C, N] one-hot. Outputs are logits of shape (batch_size, 5).
+"""
+
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
+# ---------------------------------------------------------------------
+# PromoterCNN (refactored: BN, stride-2 early downsample, milder dropout)
+# ---------------------------------------------------------------------
 class PromoterCNN(nn.Module):
-    """Lightweight CNN for promoter sequence classification.
+    """Improved CNN for promoter sequence classification.
 
-    This model is designed to work with the hyperparameter tuning system
-    and automatically loads the best hyperparameters when available.
-    
-    Architecture features:
-    - Configurable depth (number of conv blocks)
-    - Configurable base channels
-    - Dropout for regularization
-    - Adaptive pooling for variable sequence lengths
+    Input:  (B, 5, L) one-hot (A,T,G,C,N), default L=600
+    Output: (B, 5) logits
+
+    Key changes vs original:
+    - BatchNorm after convs to stabilise optimisation.
+    - Replace aggressive MaxPool1d(4) with stride-2 conv to keep more signal.
+    - Keep dropout but tone it down (default 0.2) and distribute it more sensibly.
+    - Slightly richer classifier head for class separation.
     """
 
-    def __init__(self, sequence_length: int = 600, num_blocks: int = 3, base_channels: int = 24, dropout: float = 0.2, num_classes: int = 5):
+    def __init__(
+        self,
+        sequence_length: int = 600,
+        num_blocks: int = 4,
+        base_channels: int = 64,
+        dropout: float = 0.2,
+        num_classes: int = 5,
+    ):
         super().__init__()
-        assert num_blocks >= 1
+        assert num_blocks >= 1, "num_blocks must be >= 1"
 
         conv_layers = []
         in_ch = 5
         out_ch = base_channels
-        # First (and main) conv block
-        conv_layers.append(nn.Conv1d(in_channels=in_ch, out_channels=out_ch, kernel_size=11, padding=5))
-        conv_layers.append(nn.ReLU())
-        conv_layers.append(nn.MaxPool1d(kernel_size=4))
-        conv_layers.append(nn.Dropout(dropout))
+
+        # First block: stride-2 to gently downsample (instead of MaxPool(4))
+        conv_layers += [
+            nn.Conv1d(in_ch, out_ch, kernel_size=11, padding=5, stride=2, bias=False),
+            nn.BatchNorm1d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        ]
         in_ch = out_ch
 
-        # Optional second conv block if requested
-        if num_blocks >= 2:
-            conv_layers.append(nn.Conv1d(in_channels=in_ch, out_channels=out_ch, kernel_size=7, padding=3))
-            conv_layers.append(nn.ReLU())
-            conv_layers.append(nn.Dropout(dropout))
+        # Additional blocks (no further downsampling; keep receptive field growth)
+        for _ in range(num_blocks - 1):
+            conv_layers += [
+                nn.Conv1d(in_ch, out_ch, kernel_size=7, padding=3, bias=False),
+                nn.BatchNorm1d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+            ]
             in_ch = out_ch
+
         conv_layers.append(nn.AdaptiveAvgPool1d(1))
         self.sequence_conv = nn.Sequential(*conv_layers)
 
-        final_ch = in_ch
-        # Minimal classifier for simplicity
-        self.classifier = nn.Linear(final_ch, num_classes)
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Flatten(),                     # (B, C, 1) -> (B, C)
+            nn.LayerNorm(in_ch),
+            nn.Dropout(dropout),
+            nn.Linear(in_ch, in_ch // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(in_ch // 2, num_classes),
+        )
+
+        # Kaiming init for convs
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
 
     def forward(self, sequence: torch.Tensor) -> torch.Tensor:
-        x = self.sequence_conv(sequence)
-        x = x.squeeze(-1)
-        logits = self.classifier(x)
+        x = self.sequence_conv(sequence)  # (B, C, 1)
+        logits = self.classifier(x)       # (B, num_classes)
         return logits
-    
+
     @classmethod
     def from_best_config(cls, sequence_length: int = 600):
         """
         Create model instance using the best hyperparameters from tuning.
-        
-        Args:
-            sequence_length: Length of input sequences
-            
+
         Returns:
-            PromoterCNN instance with optimized hyperparameters
+            PromoterCNN instance with optimised hyperparameters if available,
+            otherwise falls back to defaults.
         """
         try:
-            # Try to import hyperparameter config
             import sys
             from pathlib import Path
-            
-            # Add hyperparameter_tuning to path
-            hyperparameter_path = Path(__file__).parent.parent.parent / 'hyperparameter_tuning'
+
+            hyperparameter_path = Path(__file__).parent.parent.parent / "hyperparameter_tuning"
             sys.path.append(str(hyperparameter_path))
-            
             from config import load_best_config
-            
-            config = load_best_config('promoter_cnn')
-            
+
+            config = load_best_config("promoter_cnn")
             return cls(
                 sequence_length=sequence_length,
                 num_blocks=config.depth,
                 base_channels=config.base_channels,
                 dropout=config.dropout,
-                num_classes=config.num_classes
+                num_classes=config.num_classes,
             )
-            
         except ImportError:
             print("⚠️  Could not load hyperparameter config, using defaults")
             return cls(sequence_length=sequence_length)
@@ -88,89 +130,89 @@ class PromoterCNN(nn.Module):
             return cls(sequence_length=sequence_length)
 
 
+# ---------------------------------------------------------------------
+# MultiKernelCNN (refactored: BN + consistent padding and naming)
+# ---------------------------------------------------------------------
 class MultiKernelCNN(nn.Module):
-    """CNN with multiple fixed kernel sizes (3, 5, 7) for promoter sequence classification.
-    
-    This model uses three parallel convolutional branches with different kernel sizes
-    to capture features at different scales, then combines them for classification.
-    No extendable blocks - fixed architecture for simplicity and interpretability.
-    
+    """CNN with multiple fixed kernel sizes (7, 9, 11) for promoter sequence classification.
+
     Architecture:
-    - Three parallel conv branches with kernel sizes 3, 5, 7
-    - Each branch: Conv1D -> ReLU -> MaxPool -> Dropout
+    - Three parallel conv branches with kernel sizes 7, 9, 11
+      Each branch: Conv1D -> BatchNorm -> ReLU -> MaxPool(2) -> Dropout
+    - Global average pooling
     - Feature concatenation and final classification
+
+    Input:  (B, 5, L) one-hot (A,T,G,C,N), default L=600
+    Output: (B, 5) logits
     """
-    
-    def __init__(self, sequence_length: int = 600, base_channels: int = 32, dropout: float = 0.2, num_classes: int = 5):
+
+    def __init__(
+        self,
+        sequence_length: int = 600,
+        base_channels: int = 32,
+        dropout: float = 0.2,
+        num_classes: int = 5,
+    ):
         super().__init__()
-        
-        # Input channels (assuming one-hot encoded DNA: A, T, G, C, N)
+
         in_channels = 5
-        
-        # Three parallel convolutional branches with different kernel sizes
-        # Branch 1: Kernel size 3 (local features)
-        self.conv3 = nn.Sequential(
-            nn.Conv1d(in_channels=in_channels, out_channels=base_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
+
+        # Branch 1: k=7
+        self.branch7 = nn.Sequential(
+            nn.Conv1d(in_channels, base_channels, kernel_size=7, padding=3, bias=False),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=2, stride=2),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
-        
-        # Branch 2: Kernel size 5 (medium-range features)  
-        self.conv5 = nn.Sequential(
-            nn.Conv1d(in_channels=in_channels, out_channels=base_channels, kernel_size=5, padding=2),
-            nn.ReLU(),
+
+        # Branch 2: k=9
+        self.branch9 = nn.Sequential(
+            nn.Conv1d(in_channels, base_channels, kernel_size=9, padding=4, bias=False),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=2, stride=2),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
-        
-        # Branch 3: Kernel size 7 (long-range features)
-        self.conv7 = nn.Sequential(
-            nn.Conv1d(in_channels=in_channels, out_channels=base_channels, kernel_size=7, padding=3),
-            nn.ReLU(),
+
+        # Branch 3: k=11
+        self.branch11 = nn.Sequential(
+            nn.Conv1d(in_channels, base_channels, kernel_size=11, padding=5, bias=False),
+            nn.BatchNorm1d(base_channels),
+            nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=2, stride=2),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
-        
-        # Global average pooling to handle variable sequence lengths
+
         self.global_pool = nn.AdaptiveAvgPool1d(1)
-        
-        # Calculate total features after concatenation (3 branches * base_channels)
         total_features = base_channels * 3
-        
-        # Classification head
+
         self.classifier = nn.Sequential(
             nn.Linear(total_features, total_features // 2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(total_features // 2, num_classes)
+            nn.Linear(total_features // 2, num_classes),
         )
-        
+
+        # Kaiming init for convs
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+
     def forward(self, sequence: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the multi-kernel CNN.
-        
-        Args:
-            sequence: Input tensor of shape (batch_size, channels, sequence_length)
-            
-        Returns:
-            logits: Output tensor of shape (batch_size, num_classes)
-        """
-        # Apply each convolutional branch in parallel
-        x3 = self.conv3(sequence)  # Features from kernel size 3
-        x5 = self.conv5(sequence)  # Features from kernel size 5  
-        x7 = self.conv7(sequence)  # Features from kernel size 7
-        
-        # Apply global average pooling to each branch
-        x3 = self.global_pool(x3).squeeze(-1)  # (batch_size, base_channels)
-        x5 = self.global_pool(x5).squeeze(-1)  # (batch_size, base_channels)
-        x7 = self.global_pool(x7).squeeze(-1)  # (batch_size, base_channels)
-        
-        # Concatenate features from all branches
-        x = torch.cat([x3, x5, x7], dim=1)  # (batch_size, base_channels * 3)
-        
-        # Classification
-        logits = self.classifier(x)
+        x7 = self.branch7(sequence)
+        x9 = self.branch9(sequence)
+        x11 = self.branch11(sequence)
+
+        # Global average pool each branch and flatten
+        x7 = self.global_pool(x7).squeeze(-1)    # (B, base_channels)
+        x9 = self.global_pool(x9).squeeze(-1)    # (B, base_channels)
+        x11 = self.global_pool(x11).squeeze(-1)  # (B, base_channels)
+
+        # Concatenate features across branches
+        x = torch.cat([x7, x9, x11], dim=1)      # (B, base_channels * 3)
+        logits = self.classifier(x)              # (B, num_classes)
         return logits
 
 
+__all__ = ["PromoterCNN", "MultiKernelCNN"]

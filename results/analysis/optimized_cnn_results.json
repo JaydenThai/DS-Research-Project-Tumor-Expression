@@ -1,0 +1,58 @@
+{
+  "model_config": {
+    "depth": 4,
+    "base_channels": 64,
+    "dropout": 0.3,
+    "learning_rate": 0.0005,
+    "weight_decay": 5e-05,
+    "optimizer": "adamw",
+    "scheduler": "cosine",
+    "loss_function": "kldiv",
+    "batch_size": 64,
+    "gradient_clipping": true,
+    "max_grad_norm": 1.0,
+    "label_smoothing": 0.0,
+    "max_epochs": 50,
+    "early_stopping_patience": 15,
+    "num_classes": 5
+  },
+  "training_results": {
+    "epochs_trained": 50,
+    "best_val_loss": 1.1122693873587108,
+    "final_train_loss": 1.1124085563988912,
+    "training_time_seconds": 88.56448602676392
+  },
+  "performance_metrics": {
+    "Component_1": {
+      "MSE": 0.06144600361585617,
+      "R2": 0.005251884460449219,
+      "Correlation": 0.0740939280287889
+    },
+    "Component_2": {
+      "MSE": 0.13854095339775085,
+      "R2": 0.002137482166290283,
+      "Correlation": 0.050987898291188674
+    },
+    "Component_3": {
+      "MSE": 0.07398806512355804,
+      "R2": 0.0009528398513793945,
+      "Correlation": 0.03243867633137084
+    },
+    "Component_4": {
+      "MSE": 0.10052089393138885,
+      "R2": 0.0008869767189025879,
+      "Correlation": 0.052726257947923925
+    },
+    "Component_5": {
+      "MSE": 0.1443762481212616,
+      "R2": 0.00033485889434814453,
+      "Correlation": 0.019795903547745162
+    },
+    "Overall": {
+      "MSE": 0.10377441346645355,
+      "R2": 0.07134377956390381,
+      "Correlation": 0.26710269736024017
+    }
+  },
+  "classification_accuracy": 0.3389524382901866
+}

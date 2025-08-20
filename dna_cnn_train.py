@@ -371,7 +371,7 @@ if __name__ == "__main__":
     p.add_argument("--loss", type=str, default="weighted_ce",
                    choices=["ce","focal","weighted_ce","balanced_ce","ldam","logit_adj"])
     p.add_argument("--label-smoothing", type=float, default=0.0)      # off by default
-    p.add_argument("--lr", type=float, default=3e-4)                  # less aggressive
+    p.add_argument("--lr", type=float, default=1e-4)                  # less aggressive
     p.add_argument("--weight-decay", type=float, default=5e-4)        # moderate
     p.add_argument("--rc-tta", action="store_true", default=True, help="Reverse-complement TTA (mono only)")
     p.add_argument("--seed", type=int, default=42)

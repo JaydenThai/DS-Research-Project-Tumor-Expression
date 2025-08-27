@@ -9,16 +9,16 @@ from torch.utils.data import Dataset
 class PromoterDataset(Dataset):
     """Dataset for promoter sequences only.
 
-    Produces one-hot encoded sequences shaped (5, L) suitable for Conv1d.
-    Targets are normalized to a valid probability distribution across 5 classes.
+    Produces one-hot encoded sequences shaped (L, 4) that gets transposed in model.
+    Targets are normalized to a valid probability distribution across 4 classes.
     """
 
     def __init__(self, sequences: List[str], targets: np.ndarray, max_length: int = 600):
         self.sequences = sequences
         self.targets = targets
         self.max_length = max_length
-        # A, T, G, C, N
-        self.dna_dict = {"A": 0, "T": 1, "G": 2, "C": 3, "N": 4}
+        # A, T, G, C (N will be encoded as [0,0,0,0])
+        self.dna_dict = {"A": 0, "T": 1, "G": 2, "C": 3}
 
     def __len__(self) -> int:
         return len(self.sequences)
@@ -30,10 +30,13 @@ class PromoterDataset(Dataset):
         else:
             seq = seq + "N" * (self.max_length - len(seq))
 
-        encoded = np.array([self.dna_dict.get(base.upper(), 4) for base in seq])
-        one_hot = np.zeros((self.max_length, 5), dtype=np.float32)
-        one_hot[np.arange(self.max_length), encoded] = 1.0
-        return one_hot.T
+        encoded = np.array([self.dna_dict.get(base.upper(), -1) for base in seq])
+        one_hot = np.zeros((self.max_length, 4), dtype=np.float32)
+        # Only set one-hot for valid nucleotides (A, T, G, C)
+        valid_mask = encoded != -1
+        one_hot[np.arange(self.max_length)[valid_mask], encoded[valid_mask]] = 1.0
+        # N nucleotides remain as [0,0,0,0] (null encoding)
+        return one_hot
 
     def __getitem__(self, idx: int):
         sequence = self.encode_sequence(self.sequences[idx])
@@ -54,7 +57,7 @@ def load_and_prepare_data(file_path: str) -> Tuple[List[str], np.ndarray]:
 
     Expects columns:
     - ProSeq: DNA sequence string
-    - Component_1_Probability ... Component_5_Probability
+    - Component_1_Probability ... Component_4_Probability
     """
 
     df = pd.read_csv(file_path)
@@ -63,7 +66,6 @@ def load_and_prepare_data(file_path: str) -> Tuple[List[str], np.ndarray]:
         "Component_2_Probability",
         "Component_3_Probability",
         "Component_4_Probability",
-        "Component_5_Probability",
     ]
 
     df = df.dropna(subset=["ProSeq"]).dropna(subset=prob_cols)
@@ -85,7 +87,7 @@ def load_and_prepare_data(file_path: str) -> Tuple[List[str], np.ndarray]:
 class PromoterClassificationDataset(Dataset):
     """Dataset for promoter sequences with integer class labels.
 
-    - Encodes sequences to shape (5, L) one-hot suitable for Conv1d
+    - Encodes sequences to shape (L, 4) that gets transposed in model to (4, L) for Conv1d
     - Targets are integer class indices in [0, num_classes-1]
     """
 
@@ -93,8 +95,8 @@ class PromoterClassificationDataset(Dataset):
         self.sequences = sequences
         self.labels = labels.astype(np.int64)
         self.max_length = max_length
-        # A, T, G, C, N
-        self.dna_dict = {"A": 0, "T": 1, "G": 2, "C": 3, "N": 4}
+        # A, T, G, C (N will be encoded as [0,0,0,0])
+        self.dna_dict = {"A": 0, "T": 1, "G": 2, "C": 3}
 
     def __len__(self) -> int:
         return len(self.sequences)
@@ -106,10 +108,13 @@ class PromoterClassificationDataset(Dataset):
         else:
             seq = seq + "N" * (self.max_length - len(seq))
 
-        encoded = np.array([self.dna_dict.get(base.upper(), 4) for base in seq])
-        one_hot = np.zeros((self.max_length, 5), dtype=np.float32)
-        one_hot[np.arange(self.max_length), encoded] = 1.0
-        return one_hot.T
+        encoded = np.array([self.dna_dict.get(base.upper(), -1) for base in seq])
+        one_hot = np.zeros((self.max_length, 4), dtype=np.float32)
+        # Only set one-hot for valid nucleotides (A, T, G, C)
+        valid_mask = encoded != -1
+        one_hot[np.arange(self.max_length)[valid_mask], encoded[valid_mask]] = 1.0
+        # N nucleotides remain as [0,0,0,0] (null encoding)
+        return one_hot
 
     def __getitem__(self, idx: int):
         sequence = self.encode_sequence(self.sequences[idx])
@@ -125,7 +130,7 @@ def load_and_prepare_data_classification(file_path: str) -> Tuple[List[str], np.
 
     Expects columns:
     - ProSeq: DNA sequence string
-    - Component_1_Probability ... Component_5_Probability
+    - Component_1_Probability ... Component_4_Probability
     """
 
     df = pd.read_csv(file_path)
@@ -134,7 +139,6 @@ def load_and_prepare_data_classification(file_path: str) -> Tuple[List[str], np.
         "Component_2_Probability",
         "Component_3_Probability",
         "Component_4_Probability",
-        "Component_5_Probability",
     ]
 
     df = df.dropna(subset=["ProSeq"]).dropna(subset=prob_cols)

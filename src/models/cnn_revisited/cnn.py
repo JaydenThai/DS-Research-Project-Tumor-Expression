@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-ProSeq CNN Classifier (v2 – fixes RecursionError by removing AUC)
-Train a 1D CNN on DNA sequences (column: 'ProSeq') to predict 'Predicted_Component_5'.
-
-Usage:
-  python proseq_cnn_classifier.py --csv ProSeq_with_5component_analysis.csv --outdir ./proseq_cnn_run
-"""
 
 import argparse, json, os, random, sys, pickle
 import numpy as np, pandas as pd
@@ -36,13 +28,13 @@ def parse_args():
     p.add_argument("--test_size", type=float, default=0.15)
     p.add_argument("--val_size", type=float, default=0.15)
     p.add_argument("--batch_size", type=int, default=128)
-    p.add_argument("--epochs", type=int, default=25)
+    p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--learning_rate", type=float, default=1e-3)
     p.add_argument("--dropout", type=float, default=0.3)
     p.add_argument("--filters", type=int, default=128)
-    p.add_argument("--kernel_sizes", type=str, default="7,11,15")
+    p.add_argument("--kernel_sizes", type=str, default="7,13,17")
     p.add_argument("--early_stop", type=int, default=5)
-    p.add_argument("--class_weight", action="store_true")
+    p.add_argument("--class_weight", action="store_true", default=True)
     return p.parse_args()
 
 def clean_seq(seq: str) -> str:
@@ -74,16 +66,14 @@ def build_cnn(input_len: int, num_classes: int, filters: int = 128,
     x = layers.Dense(256, activation="relu")(x)
     x = layers.BatchNormalization()(x)
     x = layers.Dropout(dropout)(x)
-    if num_classes == 2:
-        out = layers.Dense(1, activation="sigmoid", name="out")(x)
-        loss = "binary_crossentropy"
-    else:
-        out = layers.Dense(num_classes, activation="softmax", name="out")(x)
-        loss = "sparse_categorical_crossentropy"
+
+    out = layers.Dense(num_classes, activation="softmax", name="out")(x)
+    loss = "sparse_categorical_crossentropy"
+
     model = models.Model(inp, out)
     model.compile(optimizer=optimizers.Adam(learning_rate=lr),
                   loss=loss,
-                  metrics=["accuracy"])  # AUC removed to avoid recursion errors
+                  metrics=["accuracy"])
     return model
 
 def plot_history(history: tf.keras.callbacks.History, out_png: str):
@@ -127,6 +117,14 @@ def main():
     X_val_oh   = sequences_to_onehot(X_val,   maxlen)
     X_test_oh  = sequences_to_onehot(X_test,  maxlen)
 
+    print(f"X_train_oh shape: {X_train_oh.shape}")
+    print(f"X_val_oh shape: {X_val_oh.shape}")
+    print(f"X_test_oh shape: {X_test_oh.shape}")
+
+    print("X_train_sample: ", X_train_oh[0])
+    print("X_val_sample: ", X_val_oh[0])
+    print("X_test_sample: ", X_test_oh[0])
+
     class_weight = None
     if args.class_weight:
         uniq = np.unique(y_train)
@@ -134,7 +132,7 @@ def main():
         class_weight = {int(k): float(v) for k, v in zip(uniq, cw)}
 
     kernel_sizes = tuple(int(k.strip()) for k in args.kernel_sizes.split(","))
-    model = build_cnn(maxlen, num_classes, filters=args.filters,
+    model : tf.keras.Model = build_cnn(maxlen, num_classes, filters=args.filters,
                       kernel_sizes=kernel_sizes, dropout=args.dropout, lr=args.learning_rate)
 
     cbs = [
@@ -148,7 +146,7 @@ def main():
         validation_data=(X_val_oh, y_val),
         epochs=args.epochs,
         batch_size=args.batch_size,
-        callbacks=cbs,
+        #callbacks=cbs,
         class_weight=class_weight,
         verbose=2
     )

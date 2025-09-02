@@ -1,0 +1,62 @@
+{
+  "50": {
+    "test_accuracy": 0.5466586393738712,
+    "val_accuracy": 0.63732129420617,
+    "epochs_trained": 43,
+    "confusion_matrix": [
+      [
+        700,
+        345
+      ],
+      [
+        408,
+        208
+      ]
+    ]
+  },
+  "100": {
+    "test_accuracy": 0.6291390728476821,
+    "val_accuracy": 0.636568848758465,
+    "epochs_trained": 21,
+    "confusion_matrix": [
+      [
+        1045,
+        0
+      ],
+      [
+        616,
+        0
+      ]
+    ]
+  },
+  "150": {
+    "test_accuracy": 0.6291390728476821,
+    "val_accuracy": 0.636568848758465,
+    "epochs_trained": 22,
+    "confusion_matrix": [
+      [
+        1045,
+        0
+      ],
+      [
+        616,
+        0
+      ]
+    ]
+  },
+  "200": {
+    "test_accuracy": 0.5147501505117399,
+    "val_accuracy": 0.636568848758465,
+    "epochs_trained": 21,
+    "confusion_matrix": [
+      [
+        645,
+        400
+      ],
+      [
+        406,
+        210
+      ]
+    ]
+  }
+}

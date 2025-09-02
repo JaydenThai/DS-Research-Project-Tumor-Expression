@@ -81,22 +81,14 @@ def build_backbone(input_len: int, filters: int = 128, dropout: float = 0.35) ->
     x = layers.BatchNormalization()(x)
     x = layers.MaxPooling1D(2)(x)
 
-    # Dilated residual stack (captures longer motifs efficiently)
-    def res_block(z, f, k, d):
-        y = layers.Conv1D(f, k, padding="same", dilation_rate=d, activation="relu")(z)
-        y = layers.BatchNormalization()(y)
-        y = layers.Conv1D(f, k, padding="same", dilation_rate=d, activation="relu")(y)
-        y = layers.BatchNormalization()(y)
-        if z.shape[-1] != f:
-            z = layers.Conv1D(f, 1, padding="same")(z)
-        out = layers.Add()([z, y])
-        out = layers.Activation("relu")(out)
-        out = layers.MaxPooling1D(2)(out)
-        return out
-
-    x = res_block(x, filters,   7, 1)
-    x = res_block(x, filters*2, 7, 2)
-    x = res_block(x, filters*2, 7, 4)
+    # Simple conv layers
+    x = layers.Conv1D(filters, 7, padding="same", activation="relu")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling1D(2)(x)
+    
+    x = layers.Conv1D(filters*2, 7, padding="same", activation="relu")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling1D(2)(x)
 
     x = layers.GlobalMaxPooling1D()(x)
     x = layers.Dropout(dropout)(x)

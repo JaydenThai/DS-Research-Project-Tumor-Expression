@@ -28,11 +28,11 @@ def parse_args():
     p.add_argument("--test_size", type=float, default=0.15)
     p.add_argument("--val_size", type=float, default=0.15)
     p.add_argument("--batch_size", type=int, default=128)
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--learning_rate", type=float, default=1e-3)
     p.add_argument("--dropout", type=float, default=0.3)
     p.add_argument("--filters", type=int, default=128)
-    p.add_argument("--kernel_sizes", type=str, default="7,13,17")
+    p.add_argument("--kernel_sizes", type=str, default="7,11,13")
     p.add_argument("--early_stop", type=int, default=5)
     p.add_argument("--class_weight", action="store_true", default=True)
     return p.parse_args()
@@ -136,7 +136,7 @@ def main():
                       kernel_sizes=kernel_sizes, dropout=args.dropout, lr=args.learning_rate)
 
     cbs = [
-        callbacks.EarlyStopping(monitor="val_loss", patience=args.early_stop, restore_best_weights=True),
+        #callbacks.EarlyStopping(monitor="val_loss", patience=args.early_stop, restore_best_weights=True),
         callbacks.ModelCheckpoint(os.path.join(args.outdir, "model.h5"), monitor="val_loss", save_best_only=True),
         callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=max(2, args.early_stop//2), min_lr=1e-6),
     ]
@@ -146,7 +146,7 @@ def main():
         validation_data=(X_val_oh, y_val),
         epochs=args.epochs,
         batch_size=args.batch_size,
-        #callbacks=cbs,
+        callbacks=cbs,
         class_weight=class_weight,
         verbose=2
     )

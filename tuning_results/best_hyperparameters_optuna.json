@@ -1,0 +1,28 @@
+{
+  "best_params": {
+    "conv1_channels": 16,
+    "conv2_channels": 62,
+    "conv3_channels": 98,
+    "kernel1_size": 11,
+    "kernel2_size": 7,
+    "kernel3_size": 3,
+    "pool_size": 6,
+    "learning_rate": 4.523529917658779e-06,
+    "weight_decay": 5.6606706992588876e-06,
+    "dropout_rate": 0.32477138247026877,
+    "batch_size": 16,
+    "optimizer": "rmsprop",
+    "use_scheduler": true,
+    "label_smoothing": 0.0913841307520112,
+    "grad_clip": 0.28557701661212936,
+    "momentum": 0.8352741829909569,
+    "beta1": 0.8660228740609403,
+    "beta2": 0.9120817852496331,
+    "nesterov": true
+  },
+  "best_value": 0.0,
+  "best_param_count": 26151,
+  "samples_per_param": 0.31746395931321936,
+  "n_trials": 20,
+  "optimization_time_minutes": 0.004766380786895752
+}

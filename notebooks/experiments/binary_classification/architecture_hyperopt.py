@@ -257,9 +257,13 @@ class ArchitectureOptimizer:
     def objective(self, trial):
         """Optuna objective function"""
         
+        print(f"\n🔍 Trial {trial.number} starting...")
+        
         # Architecture hyperparameters
         num_conv_layers = trial.suggest_int('num_conv_layers', 2, 5)
         num_fc_layers = trial.suggest_int('num_fc_layers', 1, 4)
+        
+        print(f"  📐 Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
         
         # Convolutional layer parameters
         conv_channels = []
@@ -313,9 +317,11 @@ class ArchitectureOptimizer:
             
             # Count parameters
             param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"  🔢 Model parameters: {param_count:,}")
             
             # Skip if too many parameters (memory constraint)
-            if param_count > 10_000_000:  # 10M parameters max
+            if param_count > 1_000_000:  # 1M parameters max
+                print(f"  ⚠️  Skipping: too many parameters ({param_count:,} > 10M)")
                 return 0.0
             
             # Create optimizer
@@ -334,10 +340,12 @@ class ArchitectureOptimizer:
             # Training loop
             criterion = nn.BCELoss()
             num_epochs = 15  # Quick training for hyperparameter search
+            print(f"  🏋️  Training for {num_epochs} epochs...")
             
             model.train()
             for epoch in range(num_epochs):
                 epoch_loss = 0.0
+                num_batches = 0
                 for batch_x, batch_y in train_loader:
                     batch_x = batch_x.to(self.device)
                     batch_y = batch_y.float().to(self.device)
@@ -352,6 +360,11 @@ class ArchitectureOptimizer:
                     
                     optimizer.step()
                     epoch_loss += loss.item()
+                    num_batches += 1
+                
+                if (epoch + 1) % 5 == 0:
+                    avg_loss = epoch_loss / num_batches
+                    print(f"    Epoch {epoch+1}/{num_epochs}: Loss = {avg_loss:.4f}")
             
             # Validation
             model.eval()
@@ -387,6 +400,9 @@ class ArchitectureOptimizer:
             efficiency_penalty = param_count / 1_000_000  # Penalty per million parameters
             score = score - 0.01 * efficiency_penalty
             
+            print(f"  📊 Results: F1={val_f1:.4f}, AUC={val_auc:.4f}, Acc={val_accuracy:.4f}")
+            print(f"  🎯 Final score: {score:.4f}")
+            
             # Log key metrics for this trial
             trial.set_user_attr('val_accuracy', val_accuracy)
             trial.set_user_attr('val_f1', val_f1)
@@ -397,10 +413,10 @@ class ArchitectureOptimizer:
             return score
             
         except Exception as e:
-            print(f"Trial failed: {e}")
+            print(f"  ❌ Trial {trial.number} failed: {e}")
             return 0.0
     
-    def optimize(self, n_trials=100, timeout=3600):
+    def optimize(self, n_trials=100, timeout=14400):
         """Run optimization"""
         print(f"\n🚀 Starting architecture optimization")
         print(f"Number of trials: {n_trials}")
@@ -414,9 +430,23 @@ class ArchitectureOptimizer:
             sampler=optuna.samplers.TPESampler(seed=42)
         )
         
+        # Progress callback
+        def progress_callback(study, trial):
+            if trial.number % 5 == 0 or trial.number < 5:
+                print(f"\n📈 Progress Update - Trial {trial.number}")
+                if len(study.trials) > 1:
+                    best_value = study.best_value
+                    best_trial = study.best_trial.number
+                    print(f"  🏆 Current best: Trial {best_trial} with score {best_value:.4f}")
+                    
+                    # Show best architecture so far
+                    best_params = study.best_params
+                    print(f"  🏗️  Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {best_params.get('num_fc_layers', 'N/A')} FC")
+                print("-" * 50)
+        
         # Optimize
         start_time = time.time()
-        study.optimize(self.objective, n_trials=n_trials, timeout=timeout)
+        study.optimize(self.objective, n_trials=n_trials, timeout=timeout, callbacks=[progress_callback])
         optimization_time = time.time() - start_time
         
         print(f"\n🏆 OPTIMIZATION COMPLETE!")
@@ -709,9 +739,11 @@ if __name__ == "__main__":
     # Create optimizer
     optimizer = ArchitectureOptimizer(device, train_dataset, val_dataset, class_weights)
     
-    # Run optimization
+    # Run optimization (start with fewer trials for testing)
     print(f"\n🚀 Starting CNN architecture optimization...")
-    study = optimizer.optimize(n_trials=50, timeout=7200)  # 2 hours max
+    print(f"Device: {device}")
+    print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    study = optimizer.optimize(n_trials=20, timeout=3600)  # 1 hour max, 20 trials for testing
     
     # Visualize results
     viz_path = os.path.join(project_root, 'results', 'cnn_architecture_optimization.png')

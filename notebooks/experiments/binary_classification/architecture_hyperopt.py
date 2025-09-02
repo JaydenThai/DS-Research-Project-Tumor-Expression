@@ -23,6 +23,9 @@ import time
 import random
 from typing import Dict, List, Tuple, Optional
 import warnings
+import logging
+import sys
+from io import StringIO
 warnings.filterwarnings('ignore')
 
 # Set seeds for reproducibility
@@ -35,6 +38,49 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 set_seed(42)
+
+class OutputLogger:
+    """Captures all print outputs for logging"""
+    def __init__(self):
+        self.log_buffer = StringIO()
+        self.original_stdout = sys.stdout
+        self.start_time = time.time()
+        
+    def start_logging(self):
+        """Start capturing outputs"""
+        sys.stdout = self
+        
+    def stop_logging(self):
+        """Stop capturing and return to normal output"""
+        sys.stdout = self.original_stdout
+        
+    def write(self, text):
+        """Write to both original stdout and buffer"""
+        self.original_stdout.write(text)
+        self.original_stdout.flush()
+        self.log_buffer.write(text)
+        
+    def flush(self):
+        """Flush both outputs"""
+        self.original_stdout.flush()
+        
+    def get_log(self):
+        """Get the complete log"""
+        return self.log_buffer.getvalue()
+    
+    def save_log(self, filepath):
+        """Save log to file"""
+        with open(filepath, 'w') as f:
+            f.write(f"CNN Architecture Optimization Log\n")
+            f.write(f"Started at: {time.ctime(self.start_time)}\n")
+            f.write(f"Completed at: {time.ctime()}\n")
+            f.write(f"Total runtime: {(time.time() - self.start_time)/60:.2f} minutes\n")
+            f.write("="*80 + "\n\n")
+            f.write(self.get_log())
+
+# Initialize logger
+output_logger = OutputLogger()
+output_logger.start_logging()
 
 print("CNN ARCHITECTURE HYPERPARAMETER OPTIMIZATION")
 print("="*70)
@@ -473,6 +519,7 @@ class ArchitectureOptimizer:
             
             print(f"  📊 Results: F1={val_f1:.4f}, AUC={val_auc:.4f}, Acc={val_accuracy:.4f}")
             print(f"  🎯 Final score: {score:.4f}")
+            print(f"  ✅ Trial {trial.number} completed successfully!")
             
             # Log key metrics for this trial
             trial.set_user_attr('val_accuracy', val_accuracy)
@@ -501,10 +548,12 @@ class ArchitectureOptimizer:
             sampler=optuna.samplers.TPESampler(seed=42)
         )
         
-        # Progress callback
+        # Progress callback with detailed logging
         def progress_callback(study, trial):
             if trial.number % 5 == 0 or trial.number < 5:
                 print(f"\n📈 Progress Update - Trial {trial.number}")
+                print(f"  ⏱️  Runtime so far: {(time.time() - start_time)/60:.1f} minutes")
+                
                 if len(study.trials) > 1:
                     best_value = study.best_value
                     best_trial = study.best_trial.number
@@ -512,10 +561,22 @@ class ArchitectureOptimizer:
                     
                     # Show best architecture so far
                     best_params = study.best_params
-                    print(f"  🏗️  Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {best_params.get('num_fc_layers', 'N/A')} FC")
-                    print("Best Accuracy: ", study.best_trial.user_attrs.get('val_accuracy', 'N/A'))
-                    print("Best F1: ", study.best_trial.user_attrs.get('val_f1', 'N/A'))
-                    print("Best AUC: ", study.best_trial.user_attrs.get('val_auc', 'N/A'))
+                    fc_info = f"{best_params.get('num_fc_layers', 0)} FC" if best_params.get('use_fc_layers', False) else "No FC"
+                    print(f"  🏗️  Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {fc_info}")
+                    print(f"  📊 Best metrics - Acc: {study.best_trial.user_attrs.get('val_accuracy', 0):.4f}, F1: {study.best_trial.user_attrs.get('val_f1', 0):.4f}, AUC: {study.best_trial.user_attrs.get('val_auc', 0):.4f}")
+                    print(f"  🔢 Best params: {study.best_trial.user_attrs.get('param_count', 'N/A'):,} parameters")
+                    print(f"  ⚙️  Best config: {best_params.get('pooling_type', 'N/A')} pooling, {best_params.get('activation', 'N/A')} activation")
+                
+                # Show current trial info
+                if trial.value is not None:
+                    print(f"  📋 Trial {trial.number}: Score = {trial.value:.4f}")
+                    if hasattr(trial, 'user_attrs'):
+                        acc = trial.user_attrs.get('val_accuracy', 0)
+                        f1 = trial.user_attrs.get('val_f1', 0)
+                        auc = trial.user_attrs.get('val_auc', 0)
+                        params = trial.user_attrs.get('param_count', 0)
+                        print(f"  📊 Trial {trial.number} metrics: Acc={acc:.4f}, F1={f1:.4f}, AUC={auc:.4f}, Params={params:,}")
+                
                 print("-" * 50)
         
         # Optimize
@@ -856,6 +917,32 @@ if __name__ == "__main__":
         json.dump(results, f, indent=2, default=str)
     
     print(f"\n💾 Results saved to '{results_path}'")
+    
+    # Save comprehensive log
+    log_path = os.path.join(project_root, 'results', 'cnn_architecture_optimization_log.txt')
+    output_logger.save_log(log_path)
+    print(f"📝 Complete training log saved to '{log_path}'")
+    
     print(f"\n✅ CNN ARCHITECTURE OPTIMIZATION COMPLETE!")
     print(f"🏗️  Best architecture found with {final_results['param_count']:,} parameters")
     print(f"🎯 Final test F1 score: {final_results['test_f1']:.4f}")
+    
+    # Stop logging and print summary
+    output_logger.stop_logging()
+    
+    print(f"\n" + "="*80)
+    print("OPTIMIZATION SUMMARY")
+    print("="*80)
+    print(f"Total runtime: {(time.time() - output_logger.start_time)/60:.2f} minutes")
+    print(f"Trials completed: {len(study.trials)}")
+    print(f"Best validation score: {study.best_value:.4f}")
+    print(f"Best test accuracy: {final_results['test_accuracy']:.4f}")
+    print(f"Best test F1: {final_results['test_f1']:.4f}")
+    print(f"Model parameters: {final_results['param_count']:,}")
+    print(f"Architecture: {study.best_params['num_conv_layers']} conv layers, {study.best_params.get('num_fc_layers', 0)} FC layers")
+    print(f"Uses FC layers: {study.best_params['use_fc_layers']}")
+    print(f"Pooling type: {study.best_params['pooling_type']}")
+    print(f"Activation: {study.best_params['activation']}")
+    print(f"Optimizer: {study.best_params['optimizer']}")
+    print(f"Complete log available at: {log_path}")
+    print("="*80)

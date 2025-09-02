@@ -122,7 +122,8 @@ class FlexibleCNN(nn.Module):
                  fc_sizes=[256, 128],
                  dropout_rate=0.3,
                  use_batch_norm=True,
-                 activation='relu'):
+                 activation='relu',
+                 pooling_type='avg'):
         
         super(FlexibleCNN, self).__init__()
         
@@ -174,26 +175,42 @@ class FlexibleCNN(nn.Module):
         # Calculate size after convolutions
         self.conv_output_size = in_channels * current_length
         
-        # Fully connected layers
+        # Global pooling for architectures without FC layers
+        if pooling_type == 'avg':
+            self.global_pool = nn.AdaptiveAvgPool1d(1)
+        elif pooling_type == 'max':
+            self.global_pool = nn.AdaptiveMaxPool1d(1)
+        else:  # 'both'
+            self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+            self.global_max_pool = nn.AdaptiveMaxPool1d(1)
+            in_channels = in_channels * 2  # Double channels for concatenation
+        
+        self.pooling_type = pooling_type
+        
+        # Fully connected layers (optional)
         self.fc_layers = nn.ModuleList()
         self.fc_bn_layers = nn.ModuleList()
         
-        fc_input_size = self.conv_output_size
-        
-        for i in range(num_fc_layers):
-            fc_output_size = fc_sizes[i] if i < len(fc_sizes) else fc_sizes[-1]
+        if num_fc_layers > 0:
+            fc_input_size = in_channels  # After global pooling, size is just the number of channels
             
-            self.fc_layers.append(nn.Linear(fc_input_size, fc_output_size))
+            for i in range(num_fc_layers):
+                fc_output_size = fc_sizes[i] if i < len(fc_sizes) else fc_sizes[-1]
+                
+                self.fc_layers.append(nn.Linear(fc_input_size, fc_output_size))
+                
+                if use_batch_norm:
+                    self.fc_bn_layers.append(nn.BatchNorm1d(fc_output_size))
+                else:
+                    self.fc_bn_layers.append(nn.Identity())
+                
+                fc_input_size = fc_output_size
             
-            if use_batch_norm:
-                self.fc_bn_layers.append(nn.BatchNorm1d(fc_output_size))
-            else:
-                self.fc_bn_layers.append(nn.Identity())
-            
-            fc_input_size = fc_output_size
-        
-        # Output layer
-        self.output_layer = nn.Linear(fc_input_size, 1)
+            # Output layer
+            self.output_layer = nn.Linear(fc_input_size, 1)
+        else:
+            # Direct output from global pooled features
+            self.output_layer = nn.Linear(in_channels, 1)
         
         # Initialize weights
         self._initialize_weights()
@@ -223,10 +240,15 @@ class FlexibleCNN(nn.Module):
             x = self.pool_layers[i](x)
             x = F.dropout(x, p=self.dropout_rate, training=self.training)
         
-        # Flatten
-        x = x.view(x.size(0), -1)
+        # Global pooling
+        if self.pooling_type == 'both':
+            x_avg = self.global_avg_pool(x).squeeze(-1)  # [batch, channels]
+            x_max = self.global_max_pool(x).squeeze(-1)  # [batch, channels]
+            x = torch.cat([x_avg, x_max], dim=1)         # [batch, 2*channels]
+        else:
+            x = self.global_pool(x).squeeze(-1)          # [batch, channels]
         
-        # Fully connected layers
+        # Fully connected layers (if any)
         for i in range(self.num_fc_layers):
             x = self.fc_layers[i](x)
             x = self.fc_bn_layers[i](x)
@@ -261,9 +283,15 @@ class ArchitectureOptimizer:
         
         # Architecture hyperparameters
         num_conv_layers = trial.suggest_int('num_conv_layers', 2, 5)
-        num_fc_layers = trial.suggest_int('num_fc_layers', 1, 4)
+        # Architecture type - with or without FC layers
+        use_fc_layers = trial.suggest_categorical('use_fc_layers', [True, False])
         
-        print(f"  📐 Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
+        if use_fc_layers:
+            num_fc_layers = trial.suggest_int('num_fc_layers', 1, 3)
+            print(f"  📐 Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
+        else:
+            num_fc_layers = 0
+            print(f"  📐 Architecture: {num_conv_layers} conv layers, direct global pooling")
         
         # Convolutional layer parameters
         conv_channels = []
@@ -286,11 +314,12 @@ class ArchitectureOptimizer:
             pool_size = trial.suggest_int(f'pool_size_{i}', 2, 4)
             pool_sizes.append(pool_size)
         
-        # Fully connected layer parameters
+        # Fully connected layer parameters (only if using FC layers)
         fc_sizes = []
-        for i in range(num_fc_layers):
-            fc_size = trial.suggest_int(f'fc_size_{i}', 32, 512)
-            fc_sizes.append(fc_size)
+        if use_fc_layers:
+            for i in range(num_fc_layers):
+                fc_size = trial.suggest_int(f'fc_size_{i}', 32, 512)
+                fc_sizes.append(fc_size)
         
         # Other hyperparameters
         dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.7)
@@ -300,6 +329,9 @@ class ArchitectureOptimizer:
         use_batch_norm = trial.suggest_categorical('use_batch_norm', [True, False])
         activation = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'gelu'])
         optimizer_type = trial.suggest_categorical('optimizer', ['adam', 'adamw', 'sgd'])
+        
+        # Global pooling type (if not using FC layers or as final pooling)
+        pooling_type = trial.suggest_categorical('pooling_type', ['avg', 'max', 'both'])
         
         try:
             # Create model
@@ -312,7 +344,8 @@ class ArchitectureOptimizer:
                 fc_sizes=fc_sizes,
                 dropout_rate=dropout_rate,
                 use_batch_norm=use_batch_norm,
-                activation=activation
+                activation=activation,
+                pooling_type=pooling_type
             ).to(self.device)
             
             # Count parameters
@@ -320,8 +353,8 @@ class ArchitectureOptimizer:
             print(f"  🔢 Model parameters: {param_count:,}")
             
             # Skip if too many parameters (memory constraint)
-            if param_count > 1_000_000:  # 1M parameters max
-                print(f"  ⚠️  Skipping: too many parameters ({param_count:,} > 10M)")
+            if param_count > 3_000_000:  # 1M parameters max
+                print(f"  ⚠️  Skipping: too many parameters ({param_count:,} > 3M)")
                 return 0.0
             
             # Create optimizer
@@ -337,13 +370,19 @@ class ArchitectureOptimizer:
             train_loader = self.create_balanced_loader(self.train_dataset, self.train_targets, batch_size)
             val_loader = DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False)
             
-            # Training loop
+            # Training loop with early stopping
             criterion = nn.BCELoss()
-            num_epochs = 15  # Quick training for hyperparameter search
-            print(f"  🏋️  Training for {num_epochs} epochs...")
+            max_epochs = 30
+            patience = 10  # High patience for early stopping
+            print(f"  🏋️  Training for up to {max_epochs} epochs (patience={patience})...")
             
-            model.train()
-            for epoch in range(num_epochs):
+            best_val_accuracy = 0.0
+            patience_counter = 0
+            best_model_weights = None
+            
+            for epoch in range(max_epochs):
+                # Training
+                model.train()
                 epoch_loss = 0.0
                 num_batches = 0
                 for batch_x, batch_y in train_loader:
@@ -362,9 +401,41 @@ class ArchitectureOptimizer:
                     epoch_loss += loss.item()
                     num_batches += 1
                 
-                if (epoch + 1) % 5 == 0:
+                # Validation for early stopping
+                if (epoch + 1) % 3 == 0:  # Check every 3 epochs
+                    model.eval()
+                    val_preds_es = []
+                    val_targets_es = []
+                    
+                    with torch.no_grad():
+                        for batch_x, batch_y in val_loader:
+                            batch_x = batch_x.to(self.device)
+                            batch_y = batch_y.float().to(self.device)
+                            
+                            outputs = model(batch_x)
+                            predicted = (outputs > 0.5).float()
+                            val_preds_es.extend(predicted.cpu().numpy())
+                            val_targets_es.extend(batch_y.cpu().numpy())
+                    
+                    val_acc_es = accuracy_score(val_targets_es, val_preds_es)
                     avg_loss = epoch_loss / num_batches
-                    print(f"    Epoch {epoch+1}/{num_epochs}: Loss = {avg_loss:.4f}")
+                    print(f"    Epoch {epoch+1}/{max_epochs}: Loss = {avg_loss:.4f}, Val Acc = {val_acc_es:.4f}")
+                    
+                    # Early stopping check
+                    if val_acc_es > best_val_accuracy:
+                        best_val_accuracy = val_acc_es
+                        patience_counter = 0
+                        best_model_weights = model.state_dict().copy()
+                    else:
+                        patience_counter += 1
+                    
+                    if patience_counter >= patience:
+                        print(f"    Early stopping at epoch {epoch+1}")
+                        break
+            
+            # Load best weights if early stopping occurred
+            if best_model_weights is not None:
+                model.load_state_dict(best_model_weights)
             
             # Validation
             model.eval()
@@ -393,8 +464,8 @@ class ArchitectureOptimizer:
             except:
                 val_auc = 0.0
             
-            # Composite score (prioritizing F1 and AUC)
-            score = 0.5 * val_f1 + 0.3 * val_auc + 0.2 * val_accuracy
+            # Composite score (prioritizing accuracy)
+            score = 0.6 * val_accuracy + 0.25 * val_f1 + 0.15 * val_auc
             
             # Penalty for large models (parameter efficiency)
             efficiency_penalty = param_count / 1_000_000  # Penalty per million parameters
@@ -584,7 +655,8 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
     
     # Reconstruct best model
     num_conv_layers = best_params['num_conv_layers']
-    num_fc_layers = best_params['num_fc_layers']
+    use_fc_layers = best_params['use_fc_layers']
+    num_fc_layers = best_params.get('num_fc_layers', 0) if use_fc_layers else 0
     
     conv_channels = []
     kernel_sizes = []
@@ -601,8 +673,9 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
         pool_sizes.append(best_params[f'pool_size_{i}'])
     
     fc_sizes = []
-    for i in range(num_fc_layers):
-        fc_sizes.append(best_params[f'fc_size_{i}'])
+    if use_fc_layers and num_fc_layers > 0:
+        for i in range(num_fc_layers):
+            fc_sizes.append(best_params[f'fc_size_{i}'])
     
     model = FlexibleCNN(
         num_conv_layers=num_conv_layers,
@@ -613,7 +686,8 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
         fc_sizes=fc_sizes,
         dropout_rate=best_params['dropout_rate'],
         use_batch_norm=best_params['use_batch_norm'],
-        activation=best_params['activation']
+        activation=best_params['activation'],
+        pooling_type=best_params['pooling_type']
     ).to(device)
     
     # Create optimizer
@@ -641,14 +715,16 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
     test_loader = DataLoader(test_dataset, batch_size=best_params['batch_size'], shuffle=False)
     
     criterion = nn.BCELoss()
-    num_epochs = 50  # More thorough training for final model
+    max_epochs = 50  # More thorough training for final model
+    patience = 15   # Higher patience for final training
     
-    print(f"Training best model for {num_epochs} epochs...")
+    print(f"Training best model for up to {max_epochs} epochs (patience={patience})...")
     
-    best_val_f1 = 0.0
+    best_val_accuracy = 0.0
     best_model_state = None
+    patience_counter = 0
     
-    for epoch in range(num_epochs):
+    for epoch in range(max_epochs):
         # Training
         model.train()
         train_loss = 0.0
@@ -664,8 +740,8 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
             optimizer.step()
             train_loss += loss.item()
         
-        # Validation
-        if (epoch + 1) % 5 == 0:
+        # Validation every 3 epochs
+        if (epoch + 1) % 3 == 0:
             model.eval()
             val_preds = []
             val_targets = []
@@ -680,11 +756,21 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
                     val_preds.extend(predicted.cpu().numpy())
                     val_targets.extend(batch_y.cpu().numpy())
             
+            val_accuracy = accuracy_score(val_targets, val_preds)
             val_f1 = f1_score(val_targets, val_preds) if len(set(val_preds)) > 1 else 0.0
             
-            if val_f1 > best_val_f1:
-                best_val_f1 = val_f1
+            print(f"Epoch {epoch+1}: Val Acc = {val_accuracy:.4f}, Val F1 = {val_f1:.4f}")
+            
+            if val_accuracy > best_val_accuracy:
+                best_val_accuracy = val_accuracy
                 best_model_state = model.state_dict().copy()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
             
     
     # Load best model and evaluate on test set

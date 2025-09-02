@@ -26,6 +26,7 @@ import warnings
 import logging
 import sys
 from io import StringIO
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # Set seeds for reproducibility
@@ -38,6 +39,11 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 set_seed(42)
+
+def get_timestamped_filename(base_name, extension):
+    """Generate a timestamped filename"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{base_name}_{timestamp}.{extension}"
 
 class OutputLogger:
     """Captures all print outputs for logging"""
@@ -86,6 +92,7 @@ print("CNN ARCHITECTURE HYPERPARAMETER OPTIMIZATION")
 print("="*70)
 print("🎯 Optimizing: Conv layers, kernel sizes, FC layers")
 print("⚡ Using Optuna Bayesian optimization")
+print(f"📁 Output files will be timestamped: {datetime.now().strftime('%Y%m%d_%H%M%S')}")
 print("-" * 70)
 
 # Load and prepare data
@@ -880,69 +887,142 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
         'both_classes_predicted': len(set(test_preds)) > 1
     }
 
-# Main execution
+# Main execution with error handling
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Create optimizer
-    optimizer = ArchitectureOptimizer(device, train_dataset, val_dataset, class_weights)
+    # Variables to track progress
+    study = None
+    final_results = None
+    error_occurred = False
+    error_message = ""
     
-    # Run optimization (start with fewer trials for testing)
-    print(f"\n🚀 Starting CNN architecture optimization...")
-    print(f"Device: {device}")
-    print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
-    study = optimizer.optimize(n_trials=20, timeout=3600)  # 1 hour max, 20 trials for testing
+    try:
+        # Create optimizer
+        optimizer = ArchitectureOptimizer(device, train_dataset, val_dataset, class_weights)
+        
+        # Run optimization (start with fewer trials for testing)
+        print(f"\n🚀 Starting CNN architecture optimization...")
+        print(f"Device: {device}")
+        print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+        study = optimizer.optimize(n_trials=20, timeout=3600)  # 1 hour max, 20 trials for testing
+        
+        # Visualize results
+        viz_filename = get_timestamped_filename('cnn_architecture_optimization', 'png')
+        viz_path = os.path.join(project_root, 'results', viz_filename)
+        optimizer.visualize_optimization(study, viz_path)
+        
+        # Evaluate best model
+        final_results = evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_weights, device)
+        
+        # Save results
+        results = {
+            'study_summary': {
+                'best_value': study.best_value,
+                'best_params': study.best_params,
+                'n_trials': len(study.trials),
+                'optimization_time_minutes': sum(trial.duration.total_seconds() for trial in study.trials if trial.duration) / 60
+            },
+            'final_evaluation': final_results
+        }
+        
+        results_filename = get_timestamped_filename('cnn_architecture_optimization_results', 'json')
+        results_path = os.path.join(project_root, 'results', results_filename)
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+        
+        print(f"\n💾 Results saved to '{results_path}'")
+        
+    except Exception as e:
+        error_occurred = True
+        error_message = str(e)
+        print(f"\n❌ ERROR OCCURRED: {error_message}")
+        print(f"🔄 Saving partial results and logs...")
+        
+        # Save partial results if study exists
+        if study is not None:
+            try:
+                partial_results = {
+                    'study_summary': {
+                        'best_value': study.best_value if len(study.trials) > 0 else None,
+                        'best_params': study.best_params if len(study.trials) > 0 else None,
+                        'n_trials': len(study.trials),
+                        'optimization_time_minutes': sum(trial.duration.total_seconds() for trial in study.trials if trial.duration) / 60,
+                        'error_occurred': True,
+                        'error_message': error_message
+                    },
+                    'final_evaluation': None
+                }
+                
+                partial_filename = get_timestamped_filename('cnn_architecture_optimization_results_partial', 'json')
+                results_path = os.path.join(project_root, 'results', partial_filename)
+                with open(results_path, 'w') as f:
+                    json.dump(partial_results, f, indent=2, default=str)
+                
+                print(f"💾 Partial results saved to '{results_path}'")
+            except Exception as save_error:
+                print(f"❌ Could not save partial results: {save_error}")
     
-    # Visualize results
-    viz_path = os.path.join(project_root, 'results', 'cnn_architecture_optimization.png')
-    optimizer.visualize_optimization(study, viz_path)
-    
-    # Evaluate best model
-    final_results = evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_weights, device)
-    
-    # Save results
-    results = {
-        'study_summary': {
-            'best_value': study.best_value,
-            'best_params': study.best_params,
-            'n_trials': len(study.trials),
-            'optimization_time_minutes': sum(trial.duration.total_seconds() for trial in study.trials if trial.duration) / 60
-        },
-        'final_evaluation': final_results
-    }
-    
-    results_path = os.path.join(project_root, 'results', 'cnn_architecture_optimization_results.json')
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2, default=str)
-    
-    print(f"\n💾 Results saved to '{results_path}'")
-    
-    # Save comprehensive log
-    log_path = os.path.join(project_root, 'results', 'cnn_architecture_optimization_log.txt')
-    output_logger.save_log(log_path)
-    print(f"📝 Complete training log saved to '{log_path}'")
-    
-    print(f"\n✅ CNN ARCHITECTURE OPTIMIZATION COMPLETE!")
-    print(f"🏗️  Best architecture found with {final_results['param_count']:,} parameters")
-    print(f"🎯 Final test F1 score: {final_results['test_f1']:.4f}")
-    
-    # Stop logging and print summary
-    output_logger.stop_logging()
-    
-    print(f"\n" + "="*80)
-    print("OPTIMIZATION SUMMARY")
-    print("="*80)
-    print(f"Total runtime: {(time.time() - output_logger.start_time)/60:.2f} minutes")
-    print(f"Trials completed: {len(study.trials)}")
-    print(f"Best validation score: {study.best_value:.4f}")
-    print(f"Best test accuracy: {final_results['test_accuracy']:.4f}")
-    print(f"Best test F1: {final_results['test_f1']:.4f}")
-    print(f"Model parameters: {final_results['param_count']:,}")
-    print(f"Architecture: {study.best_params['num_conv_layers']} conv layers, {study.best_params.get('num_fc_layers', 0)} FC layers")
-    print(f"Uses FC layers: {study.best_params['use_fc_layers']}")
-    print(f"Pooling type: {study.best_params['pooling_type']}")
-    print(f"Activation: {study.best_params['activation']}")
-    print(f"Optimizer: {study.best_params['optimizer']}")
-    print(f"Complete log available at: {log_path}")
-    print("="*80)
+    finally:
+        # Always save the log, regardless of errors
+        try:
+            log_filename = get_timestamped_filename('cnn_architecture_optimization_log', 'txt')
+            log_path = os.path.join(project_root, 'results', log_filename)
+            
+            # Add error information to log if error occurred
+            if error_occurred:
+                print(f"\n" + "="*80)
+                print("ERROR SUMMARY")
+                print("="*80)
+                print(f"Error occurred: {error_message}")
+                if study is not None:
+                    print(f"Trials completed before error: {len(study.trials)}")
+                    if len(study.trials) > 0:
+                        print(f"Best trial before error: {study.best_value:.4f}")
+                print("="*80)
+            
+            output_logger.save_log(log_path)
+            print(f"📝 Complete training log saved to '{log_path}'")
+            
+        except Exception as log_error:
+            print(f"❌ Could not save log: {log_error}")
+        
+        # Print final summary
+        if not error_occurred and final_results is not None:
+            print(f"\n✅ CNN ARCHITECTURE OPTIMIZATION COMPLETE!")
+            print(f"🏗️  Best architecture found with {final_results['param_count']:,} parameters")
+            print(f"🎯 Final test F1 score: {final_results['test_f1']:.4f}")
+        elif error_occurred:
+            print(f"\n⚠️  CNN ARCHITECTURE OPTIMIZATION TERMINATED WITH ERROR!")
+            if study is not None and len(study.trials) > 0:
+                print(f"🔄 Completed {len(study.trials)} trials before error")
+                print(f"🏆 Best score achieved: {study.best_value:.4f}")
+        
+        # Stop logging and print summary
+        output_logger.stop_logging()
+        
+        print(f"\n" + "="*80)
+        print("FINAL SUMMARY")
+        print("="*80)
+        print(f"Total runtime: {(time.time() - output_logger.start_time)/60:.2f} minutes")
+        print(f"Error occurred: {error_occurred}")
+        if error_occurred:
+            print(f"Error message: {error_message}")
+        
+        if study is not None:
+            print(f"Trials completed: {len(study.trials)}")
+            if len(study.trials) > 0:
+                print(f"Best validation score: {study.best_value:.4f}")
+                if not error_occurred and final_results is not None:
+                    print(f"Best test accuracy: {final_results['test_accuracy']:.4f}")
+                    print(f"Best test F1: {final_results['test_f1']:.4f}")
+                    print(f"Model parameters: {final_results['param_count']:,}")
+                print(f"Architecture: {study.best_params['num_conv_layers']} conv layers, {study.best_params.get('num_fc_layers', 0)} FC layers")
+                print(f"Uses FC layers: {study.best_params['use_fc_layers']}")
+                print(f"Pooling type: {study.best_params['pooling_type']}")
+                print(f"Activation: {study.best_params['activation']}")
+                print(f"Optimizer: {study.best_params['optimizer']}")
+        
+        print(f"Complete log available at: {log_path}")
+        print("="*80)

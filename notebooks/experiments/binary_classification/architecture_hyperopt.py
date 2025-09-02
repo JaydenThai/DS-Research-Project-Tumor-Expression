@@ -372,7 +372,7 @@ class ArchitectureOptimizer:
             
             # Training loop with early stopping
             criterion = nn.BCELoss()
-            max_epochs = 30
+            max_epochs = 70
             patience = 10  # High patience for early stopping
             print(f"  🏋️  Training for up to {max_epochs} epochs (patience={patience})...")
             

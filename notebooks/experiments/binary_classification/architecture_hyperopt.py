@@ -442,6 +442,9 @@ class ArchitectureOptimizer:
                     # Show best architecture so far
                     best_params = study.best_params
                     print(f"  🏗️  Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {best_params.get('num_fc_layers', 'N/A')} FC")
+                    print("Best Accuracy: ", study.best_trial.user_attrs.get('val_accuracy', 'N/A'))
+                    print("Best F1: ", study.best_trial.user_attrs.get('val_f1', 'N/A'))
+                    print("Best AUC: ", study.best_trial.user_attrs.get('val_auc', 'N/A'))
                 print("-" * 50)
         
         # Optimize
@@ -683,7 +686,6 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
                 best_val_f1 = val_f1
                 best_model_state = model.state_dict().copy()
             
-            print(f"Epoch {epoch+1}: Val F1 = {val_f1:.4f}")
     
     # Load best model and evaluate on test set
     model.load_state_dict(best_model_state)

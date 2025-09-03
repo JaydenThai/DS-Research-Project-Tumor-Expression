@@ -2,10 +2,10 @@
 """
 CNN Architecture Hyperparameter Optimization for Binary Classification (Extensive Tuning for Small Datasets)
 
-Optimizes a wide range of hyperparameters using K-Fold Cross-Validation within each trial
+Optimizes a wide range of hyperparameters using 3-Fold Cross-Validation within each trial
 for robust evaluation. Focuses on finding well-regularized models to prevent overfitting.
 Saves all trial results to a comprehensive CSV file and generates extensive visualizations,
-including per-trial K-Fold training curves (mean +/- std).
+including per-trial K-Fold training curves (mean +/- std) and explicit epoch logs.
 """
 
 import pandas as pd
@@ -35,10 +35,11 @@ warnings.filterwarnings('ignore')
 
 # --- Configuration ---
 SEED = 1356294
-EXPERIMENT_NAME = "binary_classification_cnn_extensive"
-N_SPLITS_K_FOLD = 5 # Number of folds for cross-validation
+EXPERIMENT_NAME = "binary_classification_cnn_extensive_3fold"
+# Using 3 folds to create larger validation sets, which is often better for smaller datasets.
+N_SPLITS_K_FOLD = 3
 
-
+# Set seeds for reproducibility
 def set_seed(seed=SEED):
     random.seed(seed)
     np.random.seed(seed)
@@ -84,7 +85,6 @@ print("="*70)
 try:
     project_root = Path(__file__).resolve().parents[3]
 except NameError:
-    print("WARNING: __file__ not defined. Assuming current directory is project root.")
     project_root = Path.cwd()
 
 experiment_dir = project_root / 'results' / EXPERIMENT_NAME
@@ -136,7 +136,6 @@ class FlexibleCNN(nn.Module):
         self.num_conv_layers, self.num_fc_layers = num_conv_layers, num_fc_layers
         self.use_batch_norm, self.dropout_rate = use_batch_norm, dropout_rate
         self.activation = {'relu': nn.ReLU, 'leaky_relu': nn.LeakyReLU, 'gelu': nn.GELU, 'swish': nn.SiLU, 'elu': nn.ELU}[activation]()
-        
         self.conv_layers, self.bn_layers, self.pool_layers = nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
         in_channels = input_channels
         for i in range(num_conv_layers):
@@ -145,14 +144,10 @@ class FlexibleCNN(nn.Module):
             self.bn_layers.append(nn.BatchNorm1d(out_channels) if use_batch_norm else nn.Identity())
             self.pool_layers.append(nn.MaxPool1d(pool_sizes[i]))
             in_channels = out_channels
-        
         self.pooling_type = pooling_type
         if pooling_type == 'avg': self.global_pool = nn.AdaptiveAvgPool1d(1)
         elif pooling_type == 'max': self.global_pool = nn.AdaptiveMaxPool1d(1)
-        else:
-            self.global_avg_pool, self.global_max_pool = nn.AdaptiveAvgPool1d(1), nn.AdaptiveMaxPool1d(1)
-            in_channels *= 2
-        
+        else: self.global_avg_pool, self.global_max_pool = nn.AdaptiveAvgPool1d(1), nn.AdaptiveMaxPool1d(1); in_channels *= 2
         self.fc_layers, self.fc_bn_layers = nn.ModuleList(), nn.ModuleList()
         if num_fc_layers > 0:
             fc_input_size = in_channels
@@ -162,71 +157,50 @@ class FlexibleCNN(nn.Module):
                 self.fc_bn_layers.append(nn.BatchNorm1d(fc_output_size) if use_batch_norm else nn.Identity())
                 fc_input_size = fc_output_size
             self.output_layer = nn.Linear(fc_input_size, 1)
-        else:
-            self.output_layer = nn.Linear(in_channels, 1)
+        else: self.output_layer = nn.Linear(in_channels, 1)
         self._initialize_weights()
-
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, (nn.Conv1d, nn.Linear)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None: nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1); nn.init.constant_(m.bias, 0)
-
+            elif isinstance(m, nn.BatchNorm1d): nn.init.constant_(m.weight, 1); nn.init.constant_(m.bias, 0)
     def forward(self, x):
         x = x.transpose(1, 2)
         for i in range(self.num_conv_layers):
             x = self.activation(self.bn_layers[i](self.conv_layers[i](x)))
             x = self.pool_layers[i](x)
             x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        
-        if self.pooling_type == 'both':
-            x = torch.cat([self.global_avg_pool(x), self.global_max_pool(x)], dim=1).squeeze(-1)
-        else:
-            x = self.global_pool(x).squeeze(-1)
-        
+        if self.pooling_type == 'both': x = torch.cat([self.global_avg_pool(x), self.global_max_pool(x)], dim=1).squeeze(-1)
+        else: x = self.global_pool(x).squeeze(-1)
         for i in range(self.num_fc_layers):
             x = self.activation(self.fc_bn_layers[i](self.fc_layers[i](x)))
             x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        
-        return torch.sigmoid(self.output_layer(x)).squeeze()
+        return torch.sigmoid(self.output_layer(x))
 
 def _plot_kfold_trial_curves(trial_number, fold_histories, save_path):
-    """
-    Plots the mean and standard deviation of training/validation metrics across K-Folds for a single trial.
-    """
-    if not fold_histories:
-        return
-
+    if not fold_histories: return
     metrics = ['train_loss', 'val_auc', 'val_acc']
     metric_dfs = {metric: pd.DataFrame([pd.Series(fold[metric], index=fold['epochs']) for fold in fold_histories]).T for metric in metrics}
-    
     stats = {metric: {'mean': df.mean(axis=1), 'std': df.std(axis=1)} for metric, df in metric_dfs.items()}
     epochs = stats['train_loss']['mean'].index
-
     fig, ax1 = plt.subplots(figsize=(12, 7))
     fig.suptitle(f'Trial {trial_number} K-Fold Training Curves (Mean ± Std Dev over {len(fold_histories)} Folds)', fontsize=16)
-
     color = 'tab:red'
     ax1.set_xlabel('Epoch'); ax1.set_ylabel('Avg. Training Loss', color=color)
     ax1.plot(epochs, stats['train_loss']['mean'], color=color, marker='o', markersize=4, label='Mean Train Loss')
     ax1.fill_between(epochs, stats['train_loss']['mean'] - stats['train_loss']['std'], stats['train_loss']['mean'] + stats['train_loss']['std'], color=color, alpha=0.2)
     ax1.tick_params(axis='y', labelcolor=color); ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
-
     ax2 = ax1.twinx()
     color_auc = 'tab:blue'; ax2.set_ylabel('Validation Metric', color=color_auc)
     ax2.plot(epochs, stats['val_auc']['mean'], color=color_auc, marker='s', markersize=4, label='Mean Val AUC')
     ax2.fill_between(epochs, stats['val_auc']['mean'] - stats['val_auc']['std'], stats['val_auc']['mean'] + stats['val_auc']['std'], color=color_auc, alpha=0.2)
-    
     color_acc = 'tab:green'
     ax2.plot(epochs, stats['val_acc']['mean'], color=color_acc, marker='^', markersize=4, linestyle='--', label='Mean Val Accuracy')
     ax2.fill_between(epochs, stats['val_acc']['mean'] - stats['val_acc']['std'], stats['val_acc']['mean'] + stats['val_acc']['std'], color=color_acc, alpha=0.15)
     ax2.tick_params(axis='y', labelcolor=color_auc)
-    
     lines, labels = ax1.get_legend_handles_labels(); lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines + lines2, labels + labels2, loc='best')
-
     plt.tight_layout(rect=[0, 0, 1, 0.95]); plt.savefig(save_path); plt.close(fig)
     print(f"    Saved K-Fold training curve plot to {save_path}")
 
@@ -312,9 +286,8 @@ class ArchitectureOptimizer:
                         optimizer.zero_grad()
                         outputs = model(batch_x)
                         
-                        # [BUG FIX] Ensure outputs and targets are at least 1D for the loss function
-                        outputs = torch.atleast_1d(outputs)
-                        batch_y = torch.atleast_1d(batch_y)
+                        outputs = torch.atleast_1d(outputs).squeeze()
+                        batch_y = torch.atleast_1d(batch_y).squeeze()
 
                         with torch.no_grad():
                             true_dist = batch_y * (1.0 - label_smoothing) + 0.5 * label_smoothing
@@ -322,7 +295,7 @@ class ArchitectureOptimizer:
                         loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0); optimizer.step()
                         epoch_loss += loss.item()
                     
-                    if (epoch + 1) % 3 == 0:
+                    if (epoch + 1) % 5 == 0:
                         avg_train_loss = epoch_loss / len(train_loader)
                         model.eval(); val_probs_es, val_targets_es = [], []
                         with torch.no_grad():
@@ -335,6 +308,9 @@ class ArchitectureOptimizer:
                         val_auc_es = roc_auc_score(val_targets_es, val_probs_es)
                         val_acc_es = accuracy_score(val_targets_es, val_preds_es)
 
+                        # --- [MODIFIED] More explicit logging ---
+                        print(f"    Fold {fold+1}/{N_SPLITS_K_FOLD} | Epoch {epoch+1}/{max_epochs}: Val AUC={val_auc_es:.4f}, Val Acc={val_acc_es:.4f}")
+
                         history['epochs'].append(epoch + 1); history['train_loss'].append(avg_train_loss)
                         history['val_auc'].append(val_auc_es); history['val_acc'].append(val_acc_es)
                         
@@ -343,7 +319,7 @@ class ArchitectureOptimizer:
                         else:
                             patience_counter += 1
                         if patience_counter >= patience:
-                            print(f"    Early stopping at epoch {epoch+1} with best Val AUC: {best_val_auc:.4f}")
+                            print(f"    Early stopping.")
                             break
                 
                 fold_scores.append(best_val_auc)
@@ -411,7 +387,8 @@ def evaluate_best_model(optimizer, study, full_train_dataset, test_dataset, devi
     train_loader = DataLoader(full_train_dataset, batch_size=best_params['batch_size'], sampler=sampler)
     test_loader = DataLoader(test_dataset, batch_size=best_params['batch_size'], shuffle=False)
     criterion = nn.BCELoss()
-    num_epochs = 80
+    # Using a sensible fixed number of epochs for the final run.
+    num_epochs = 60
     print(f"Training best model for {num_epochs} epochs on the full training dataset...")
     
     model.train()
@@ -420,10 +397,9 @@ def evaluate_best_model(optimizer, study, full_train_dataset, test_dataset, devi
             batch_x, batch_y = batch_x.to(device), batch_y.float().to(device)
             optim.zero_grad()
             outputs = model(batch_x)
-
-            # [BUG FIX] Ensure outputs and targets are at least 1D for the loss function
-            outputs = torch.atleast_1d(outputs)
-            batch_y = torch.atleast_1d(batch_y)
+            
+            outputs = torch.atleast_1d(outputs).squeeze()
+            batch_y = torch.atleast_1d(batch_y).squeeze()
             
             loss = criterion(outputs, batch_y)
             loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0); optim.step()

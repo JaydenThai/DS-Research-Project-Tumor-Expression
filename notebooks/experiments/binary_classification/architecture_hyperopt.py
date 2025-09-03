@@ -24,6 +24,7 @@ import optuna
 import json
 import time
 import random
+from typing import Dict, List, Tuple, Optional
 import warnings
 import sys
 from io import StringIO
@@ -37,7 +38,7 @@ SEED = 1356294
 EXPERIMENT_NAME = "binary_classification_cnn_extensive"
 N_SPLITS_K_FOLD = 5 # Number of folds for cross-validation
 
-# Set seeds for reproducibility
+
 def set_seed(seed=SEED):
     random.seed(seed)
     np.random.seed(seed)
@@ -83,6 +84,7 @@ print("="*70)
 try:
     project_root = Path(__file__).resolve().parents[3]
 except NameError:
+    print("WARNING: __file__ not defined. Assuming current directory is project root.")
     project_root = Path.cwd()
 
 experiment_dir = project_root / 'results' / EXPERIMENT_NAME
@@ -121,7 +123,6 @@ class BinaryClassificationDataset(Dataset):
                 one_hot[i, self.dna_dict[nucleotide]] = 1.0
         return one_hot
 
-# Create a single train+val split, and a final test set. K-fold will be done on train_val_data.
 train_val_data, test_data = train_test_split(data_filtered, test_size=0.2, random_state=SEED, stratify=data_filtered['binary_classification'])
 train_val_dataset = BinaryClassificationDataset(train_val_data)
 test_dataset = BinaryClassificationDataset(test_data)
@@ -198,30 +199,23 @@ def _plot_kfold_trial_curves(trial_number, fold_histories, save_path):
     if not fold_histories:
         return
 
-    # Process histories into DataFrames, handling varying lengths due to early stopping
     metrics = ['train_loss', 'val_auc', 'val_acc']
     metric_dfs = {metric: pd.DataFrame([pd.Series(fold[metric], index=fold['epochs']) for fold in fold_histories]).T for metric in metrics}
     
-    # Calculate mean and std, which handles NaNs correctly
     stats = {metric: {'mean': df.mean(axis=1), 'std': df.std(axis=1)} for metric, df in metric_dfs.items()}
     epochs = stats['train_loss']['mean'].index
 
     fig, ax1 = plt.subplots(figsize=(12, 7))
     fig.suptitle(f'Trial {trial_number} K-Fold Training Curves (Mean ± Std Dev over {len(fold_histories)} Folds)', fontsize=16)
 
-    # Plot Training Loss
     color = 'tab:red'
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Avg. Training Loss', color=color)
+    ax1.set_xlabel('Epoch'); ax1.set_ylabel('Avg. Training Loss', color=color)
     ax1.plot(epochs, stats['train_loss']['mean'], color=color, marker='o', markersize=4, label='Mean Train Loss')
     ax1.fill_between(epochs, stats['train_loss']['mean'] - stats['train_loss']['std'], stats['train_loss']['mean'] + stats['train_loss']['std'], color=color, alpha=0.2)
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax1.tick_params(axis='y', labelcolor=color); ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
 
-    # Plot Validation Metrics
     ax2 = ax1.twinx()
-    color_auc = 'tab:blue'
-    ax2.set_ylabel('Validation Metric', color=color_auc)
+    color_auc = 'tab:blue'; ax2.set_ylabel('Validation Metric', color=color_auc)
     ax2.plot(epochs, stats['val_auc']['mean'], color=color_auc, marker='s', markersize=4, label='Mean Val AUC')
     ax2.fill_between(epochs, stats['val_auc']['mean'] - stats['val_auc']['std'], stats['val_auc']['mean'] + stats['val_auc']['std'], color=color_auc, alpha=0.2)
     
@@ -230,21 +224,15 @@ def _plot_kfold_trial_curves(trial_number, fold_histories, save_path):
     ax2.fill_between(epochs, stats['val_acc']['mean'] - stats['val_acc']['std'], stats['val_acc']['mean'] + stats['val_acc']['std'], color=color_acc, alpha=0.15)
     ax2.tick_params(axis='y', labelcolor=color_auc)
     
-    lines, labels = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
+    lines, labels = ax1.get_legend_handles_labels(); lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines + lines2, labels + labels2, loc='best')
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.savefig(save_path)
-    plt.close(fig)
+    plt.tight_layout(rect=[0, 0, 1, 0.95]); plt.savefig(save_path); plt.close(fig)
     print(f"    Saved K-Fold training curve plot to {save_path}")
 
 class ArchitectureOptimizer:
-    """Class for optimizing the architecture of the CNN using K-Fold Cross-Validation."""
     def __init__(self, device, full_train_dataset, class_weights):
-        self.device = device
-        self.full_train_dataset = full_train_dataset
-        self.class_weights = class_weights
+        self.device, self.full_train_dataset, self.class_weights = device, full_train_dataset, class_weights
         self.labels = full_train_dataset.data['binary_classification'].values
 
     def _create_model_from_params(self, params: dict) -> FlexibleCNN:
@@ -255,8 +243,7 @@ class ArchitectureOptimizer:
         for i in range(num_conv_layers):
             multiplier = params[f'conv_multiplier_{i}']
             conv_channels.append(max(8, min(int(base_channels * (multiplier**i)), 512)))
-            kernel_sizes.append(params[f'kernel_size_{i}'])
-            pool_sizes.append(params[f'pool_size_{i}'])
+            kernel_sizes.append(params[f'kernel_size_{i}']); pool_sizes.append(params[f'pool_size_{i}'])
         fc_sizes = [params[f'fc_size_{i}'] for i in range(num_fc_layers)] if use_fc_layers and num_fc_layers > 0 else []
         return FlexibleCNN(num_conv_layers=num_conv_layers, conv_channels=conv_channels, kernel_sizes=kernel_sizes, pool_sizes=pool_sizes, num_fc_layers=num_fc_layers, fc_sizes=fc_sizes, dropout_rate=params['dropout_rate'], use_batch_norm=params['use_batch_norm'], activation=params['activation'], pooling_type=params['pooling_type'])
     
@@ -322,14 +309,19 @@ class ArchitectureOptimizer:
                     model.train(); epoch_loss = 0.0
                     for batch_x, batch_y in train_loader:
                         batch_x, batch_y = batch_x.to(self.device), batch_y.float().to(self.device)
-                        optimizer.zero_grad(); outputs = model(batch_x)
+                        optimizer.zero_grad()
+                        outputs = model(batch_x)
+                        
+                        # [BUG FIX] Ensure outputs and targets are at least 1D for the loss function
+                        outputs = torch.atleast_1d(outputs)
+                        batch_y = torch.atleast_1d(batch_y)
+
                         with torch.no_grad():
                             true_dist = batch_y * (1.0 - label_smoothing) + 0.5 * label_smoothing
                         loss = criterion(outputs, true_dist)
                         loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0); optimizer.step()
                         epoch_loss += loss.item()
                     
-                    # Log metrics at a fixed interval
                     if (epoch + 1) % 3 == 0:
                         avg_train_loss = epoch_loss / len(train_loader)
                         model.eval(); val_probs_es, val_targets_es = [], []
@@ -347,8 +339,7 @@ class ArchitectureOptimizer:
                         history['val_auc'].append(val_auc_es); history['val_acc'].append(val_acc_es)
                         
                         if val_auc_es > best_val_auc:
-                            best_val_auc = val_auc_es
-                            patience_counter = 0
+                            best_val_auc = val_auc_es; patience_counter = 0
                         else:
                             patience_counter += 1
                         if patience_counter >= patience:
@@ -390,10 +381,8 @@ class ArchitectureOptimizer:
             print(f"\n[WARNING] Could not generate some Optuna plots (this is common if a parameter has low importance). Please `pip install plotly kaleido`.")
 
 def save_study_results_to_csv(study, save_path):
-    print(f"\nSaving full study results to CSV...")
-    df = study.trials_dataframe()
-    df.to_csv(save_path, index=False)
-    print(f"  Successfully saved results for {len(df)} trials to {save_path}")
+    print(f"\nSaving full study results to CSV..."); df = study.trials_dataframe()
+    df.to_csv(save_path, index=False); print(f"  Successfully saved results for {len(df)} trials to {save_path}")
 
 def plot_final_evaluation_results(results, save_dir):
     print("\nCreating final model evaluation plots...")
@@ -429,7 +418,14 @@ def evaluate_best_model(optimizer, study, full_train_dataset, test_dataset, devi
     for epoch in range(num_epochs):
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(device), batch_y.float().to(device)
-            optim.zero_grad(); outputs = model(batch_x); loss = criterion(outputs, batch_y)
+            optim.zero_grad()
+            outputs = model(batch_x)
+
+            # [BUG FIX] Ensure outputs and targets are at least 1D for the loss function
+            outputs = torch.atleast_1d(outputs)
+            batch_y = torch.atleast_1d(batch_y)
+            
+            loss = criterion(outputs, batch_y)
             loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0); optim.step()
         if (epoch + 1) % 10 == 0: print(f"  Final Training Epoch {epoch+1}/{num_epochs}")
     

@@ -117,9 +117,9 @@ output_logger.start_logging()
 
 print("CNN ARCHITECTURE HYPERPARAMETER OPTIMIZATION")
 print("="*70)
-print("🎯 Optimizing: Conv layers, kernel sizes, FC layers")
-print("⚡ Using Optuna Bayesian optimization")
-print(f"📁 Output files will be timestamped: {datetime.now().strftime('%Y%m%d_%H%M%S')}")
+print("TARGET: Optimizing Conv layers, kernel sizes, FC layers")
+print("METHOD: Using Optuna Bayesian optimization")
+print(f"OUTPUT: Files will be timestamped: {datetime.now().strftime('%Y%m%d_%H%M%S')}")
 print("-" * 70)
 
 # Load and prepare data
@@ -363,7 +363,7 @@ class ArchitectureOptimizer:
     def objective(self, trial):
         """Optuna objective function"""
         
-        print(f"\n🔍 Trial {trial.number} starting...")
+        print(f"\nTRIAL {trial.number} starting...")
         
         # Architecture hyperparameters
         num_conv_layers = trial.suggest_int('num_conv_layers', 2, 5)
@@ -372,10 +372,10 @@ class ArchitectureOptimizer:
         
         if use_fc_layers:
             num_fc_layers = trial.suggest_int('num_fc_layers', 1, 3)
-            print(f"  [RULER] Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
+            print(f"  Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
         else:
             num_fc_layers = 0
-            print(f"  [RULER] Architecture: {num_conv_layers} conv layers, direct global pooling")
+            print(f"  Architecture: {num_conv_layers} conv layers, direct global pooling")
         
         # Store num_fc_layers for later use
         trial.set_user_attr('num_fc_layers_actual', num_fc_layers)
@@ -442,11 +442,11 @@ class ArchitectureOptimizer:
             
             # Count parameters
             param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"  🔢 Model parameters: {param_count:,}")
+            print(f"  Model parameters: {param_count:,}")
             
             # Skip if too many parameters (memory constraint) - more lenient for extensive search
             if param_count > 5_000_000:  # 5M parameters max for more exploration
-                print(f"  [WARNING] Skipping: too many parameters ({param_count:,} > 5M)")
+                print(f"  WARNING: Skipping - too many parameters ({param_count:,} > 5M)")
                 return 0.0
             
             # Create optimizer with more options
@@ -469,7 +469,7 @@ class ArchitectureOptimizer:
             criterion = nn.BCELoss()
             max_epochs = 100  # More epochs for better convergence
             patience = 15    # Higher patience for extensive search
-            print(f"  [TRAINING] Training for up to {max_epochs} epochs (patience={patience})...")
+            print(f"  Training for up to {max_epochs} epochs (patience={patience})...")
             
             best_val_accuracy = 0.0
             patience_counter = 0
@@ -566,9 +566,9 @@ class ArchitectureOptimizer:
             efficiency_penalty = param_count / 1_000_000  # Penalty per million parameters
             score = score - 0.01 * efficiency_penalty
             
-            print(f"  📊 Results: F1={val_f1:.4f}, AUC={val_auc:.4f}, Acc={val_accuracy:.4f}")
-            print(f"  🎯 Final score: {score:.4f}")
-            print(f"  ✅ Trial {trial.number} completed successfully!")
+            print(f"  Results: F1={val_f1:.4f}, AUC={val_auc:.4f}, Acc={val_accuracy:.4f}")
+            print(f"  Final score: {score:.4f}")
+            print(f"  Trial {trial.number} completed successfully!")
             
             # Log key metrics for this trial
             trial.set_user_attr('val_accuracy', val_accuracy)
@@ -580,12 +580,12 @@ class ArchitectureOptimizer:
             return score
             
         except Exception as e:
-            print(f"  ❌ Trial {trial.number} failed: {e}")
+            print(f"  ERROR: Trial {trial.number} failed: {e}")
             return 0.0
     
     def optimize(self, n_trials=100, timeout=14400):
         """Run optimization"""
-        print(f"\n🚀 Starting architecture optimization")
+        print(f"\nStarting architecture optimization")
         print(f"Number of trials: {n_trials}")
         print(f"Timeout: {timeout} seconds")
         print("-" * 50)
@@ -600,33 +600,33 @@ class ArchitectureOptimizer:
         # Progress callback with detailed logging
         def progress_callback(study, trial):
             if trial.number % 5 == 0 or trial.number < 5:
-                print(f"\n📈 Progress Update - Trial {trial.number}")
-                print(f"  ⏱️  Runtime so far: {(time.time() - start_time)/60:.1f} minutes")
+                print(f"\nProgress Update - Trial {trial.number}")
+                print(f"  Runtime so far: {(time.time() - start_time)/60:.1f} minutes")
                 
                 if len(study.trials) > 1:
                     best_value = study.best_value
                     best_trial = study.best_trial.number
-                    print(f"  🏆 Current best: Trial {best_trial} with score {best_value:.4f}")
+                    print(f"  Current best: Trial {best_trial} with score {best_value:.4f}")
                     
                     # Show best architecture so far
                     best_params = study.best_params
                     # Use the stored actual num_fc_layers
                     actual_fc_layers = study.best_trial.user_attrs.get('num_fc_layers_actual', best_params.get('num_fc_layers', 0))
                     fc_info = f"{actual_fc_layers} FC" if best_params.get('use_fc_layers', False) else "No FC"
-                    print(f"  [CONSTRUCTION] Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {fc_info}")
-                    print(f"  [CHART] Best metrics - Acc: {study.best_trial.user_attrs.get('val_accuracy', 0):.4f}, F1: {study.best_trial.user_attrs.get('val_f1', 0):.4f}, AUC: {study.best_trial.user_attrs.get('val_auc', 0):.4f}")
-                    print(f"  [NUMBERS] Best params: {study.best_trial.user_attrs.get('param_count', 'N/A'):,} parameters")
-                    print(f"  [GEAR] Best config: {best_params.get('pooling_type', 'N/A')} pooling, {best_params.get('activation', 'N/A')} activation")
+                    print(f"  Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {fc_info}")
+                    print(f"  Best metrics - Acc: {study.best_trial.user_attrs.get('val_accuracy', 0):.4f}, F1: {study.best_trial.user_attrs.get('val_f1', 0):.4f}, AUC: {study.best_trial.user_attrs.get('val_auc', 0):.4f}")
+                    print(f"  Best params: {study.best_trial.user_attrs.get('param_count', 'N/A'):,} parameters")
+                    print(f"  Best config: {best_params.get('pooling_type', 'N/A')} pooling, {best_params.get('activation', 'N/A')} activation")
                 
                 # Show current trial info
                 if trial.value is not None:
-                    print(f"  📋 Trial {trial.number}: Score = {trial.value:.4f}")
+                    print(f"  Trial {trial.number}: Score = {trial.value:.4f}")
                     if hasattr(trial, 'user_attrs'):
                         acc = trial.user_attrs.get('val_accuracy', 0)
                         f1 = trial.user_attrs.get('val_f1', 0)
                         auc = trial.user_attrs.get('val_auc', 0)
                         params = trial.user_attrs.get('param_count', 0)
-                        print(f"  📊 Trial {trial.number} metrics: Acc={acc:.4f}, F1={f1:.4f}, AUC={auc:.4f}, Params={params:,}")
+                        print(f"  Trial {trial.number} metrics: Acc={acc:.4f}, F1={f1:.4f}, AUC={auc:.4f}, Params={params:,}")
                 
                 print("-" * 50)
         
@@ -635,7 +635,7 @@ class ArchitectureOptimizer:
         study.optimize(self.objective, n_trials=n_trials, timeout=timeout, callbacks=[progress_callback])
         optimization_time = time.time() - start_time
         
-        print(f"\n🏆 OPTIMIZATION COMPLETE!")
+        print(f"\nOPTIMIZATION COMPLETE!")
         print(f"Time taken: {optimization_time/60:.2f} minutes")
         print(f"Number of trials: {len(study.trials)}")
         print(f"Best score: {study.best_value:.4f}")
@@ -643,7 +643,7 @@ class ArchitectureOptimizer:
         best_params = study.best_params
         best_trial = study.best_trial
         
-        print(f"\n[CHART] BEST ARCHITECTURE:")
+        print(f"\nBEST ARCHITECTURE:")
         print(f"  Convolutional layers: {best_params['num_conv_layers']}")
         actual_fc_layers = best_trial.user_attrs.get('num_fc_layers_actual', best_params.get('num_fc_layers', 0))
         print(f"  Fully connected layers: {actual_fc_layers}")
@@ -656,7 +656,7 @@ class ArchitectureOptimizer:
     
     def visualize_optimization(self, study, save_path):
         """Create visualization of optimization results"""
-        print(f"\n📈 Creating optimization visualizations...")
+        print(f"\nCreating optimization visualizations...")
         
         # Extract trial data
         trials_df = study.trials_dataframe()
@@ -756,11 +756,11 @@ class ArchitectureOptimizer:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
         
-        print(f"📊 Visualization saved to '{save_path}'")
+        print(f"Visualization saved to '{save_path}'")
 
 def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_weights, device):
     """Evaluate the best model on test set"""
-    print(f"\n🔬 EVALUATING BEST MODEL ON TEST SET")
+    print(f"\nEVALUATING BEST MODEL ON TEST SET")
     print("-" * 50)
     
     best_params = study.best_params
@@ -913,7 +913,7 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
     test_auc = roc_auc_score(test_targets, test_probs) if len(set(test_targets)) > 1 else 0.0
     test_cm = confusion_matrix(test_targets, test_preds)
     
-    print(f"\n🎯 FINAL TEST RESULTS:")
+    print(f"\nFINAL TEST RESULTS:")
     print(f"Test Accuracy: {test_accuracy:.4f}")
     print(f"Test F1 Score: {test_f1:.4f}")
     print(f"Test AUC Score: {test_auc:.4f}")
@@ -949,7 +949,7 @@ if __name__ == "__main__":
         optimizer = ArchitectureOptimizer(device, train_dataset, val_dataset, class_weights)
         
         # Run optimization (start with fewer trials for testing)
-        print(f"\n🚀 Starting CNN architecture optimization...")
+        print(f"\nStarting CNN architecture optimization...")
         print(f"Device: {device}")
         print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
         study = optimizer.optimize(n_trials=100, timeout=3600)  # 1 hour max, 100 trials for extensive search
@@ -978,13 +978,13 @@ if __name__ == "__main__":
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2, default=str)
         
-        print(f"\n💾 Results saved to '{results_path}'")
+        print(f"\nResults saved to '{results_path}'")
         
     except Exception as e:
         error_occurred = True
         error_message = str(e)
-        print(f"\n❌ ERROR OCCURRED: {error_message}")
-        print(f"🔄 Saving partial results and logs...")
+        print(f"\nERROR OCCURRED: {error_message}")
+        print(f"Saving partial results and logs...")
         
         # Save partial results if study exists
         if study is not None:
@@ -1006,9 +1006,9 @@ if __name__ == "__main__":
                 with open(results_path, 'w') as f:
                     json.dump(partial_results, f, indent=2, default=str)
                 
-                print(f"💾 Partial results saved to '{results_path}'")
+                print(f"Partial results saved to '{results_path}'")
             except Exception as save_error:
-                print(f"❌ Could not save partial results: {save_error}")
+                print(f"ERROR: Could not save partial results: {save_error}")
     
     finally:
         # Always save the log, regardless of errors
@@ -1029,21 +1029,21 @@ if __name__ == "__main__":
                 print("="*80)
             
             output_logger.save_log(log_path)
-            print(f"📝 Complete training log saved to '{log_path}'")
+            print(f"Complete training log saved to '{log_path}'")
             
         except Exception as log_error:
-            print(f"❌ Could not save log: {log_error}")
+            print(f"ERROR: Could not save log: {log_error}")
         
         # Print final summary
         if not error_occurred and final_results is not None:
-            print(f"\n✅ CNN ARCHITECTURE OPTIMIZATION COMPLETE!")
-            print(f"🏗️  Best architecture found with {final_results['param_count']:,} parameters")
-            print(f"🎯 Final test F1 score: {final_results['test_f1']:.4f}")
+            print(f"\nCNN ARCHITECTURE OPTIMIZATION COMPLETE!")
+            print(f"Best architecture found with {final_results['param_count']:,} parameters")
+            print(f"Final test F1 score: {final_results['test_f1']:.4f}")
         elif error_occurred:
-            print(f"\n⚠️  CNN ARCHITECTURE OPTIMIZATION TERMINATED WITH ERROR!")
+            print(f"\nCNN ARCHITECTURE OPTIMIZATION TERMINATED WITH ERROR!")
             if study is not None and len(study.trials) > 0:
-                print(f"🔄 Completed {len(study.trials)} trials before error")
-                print(f"🏆 Best score achieved: {study.best_value:.4f}")
+                print(f"Completed {len(study.trials)} trials before error")
+                print(f"Best score achieved: {study.best_value:.4f}")
         
         # Stop logging and print summary
         output_logger.stop_logging()
@@ -1074,11 +1074,11 @@ if __name__ == "__main__":
         print(f"Complete log available at: {log_path}")
         
         # List all files created
-        print(f"\n[FILES] FILES CREATED:")
+        print(f"\nFILES CREATED:")
         if 'results_path' in locals():
-            print(f"  [CHART] Results: {results_path}")
+            print(f"  Results: {results_path}")
         if 'viz_path' in locals():
-            print(f"  [PROGRESS] Visualization: {viz_path}")
-        print(f"  [MEMO] Log: {log_path}")
+            print(f"  Visualization: {viz_path}")
+        print(f"  Log: {log_path}")
         
         print("="*80)

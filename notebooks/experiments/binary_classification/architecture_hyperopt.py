@@ -75,14 +75,41 @@ class OutputLogger:
         return self.log_buffer.getvalue()
     
     def save_log(self, filepath):
-        """Save log to file"""
-        with open(filepath, 'w') as f:
+        """Save log to file with UTF-8 encoding to prevent charmap errors"""
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(f"CNN Architecture Optimization Log\n")
             f.write(f"Started at: {time.ctime(self.start_time)}\n")
             f.write(f"Completed at: {time.ctime()}\n")
             f.write(f"Total runtime: {(time.time() - self.start_time)/60:.2f} minutes\n")
             f.write("="*80 + "\n\n")
-            f.write(self.get_log())
+            # Clean emojis and special characters that might cause encoding issues
+            log_content = self.get_log()
+            # Replace problematic characters
+            log_content = log_content.replace('🎯', '[TARGET]')
+            log_content = log_content.replace('⚡', '[LIGHTNING]')
+            log_content = log_content.replace('📁', '[FOLDER]')
+            log_content = log_content.replace('🚀', '[ROCKET]')
+            log_content = log_content.replace('🔍', '[SEARCH]')
+            log_content = log_content.replace('📐', '[RULER]')
+            log_content = log_content.replace('🔢', '[NUMBERS]')
+            log_content = log_content.replace('⚠️', '[WARNING]')
+            log_content = log_content.replace('🏋️', '[TRAINING]')
+            log_content = log_content.replace('📊', '[CHART]')
+            log_content = log_content.replace('✅', '[CHECK]')
+            log_content = log_content.replace('❌', '[X]')
+            log_content = log_content.replace('📈', '[PROGRESS]')
+            log_content = log_content.replace('⏱️', '[TIMER]')
+            log_content = log_content.replace('🏆', '[TROPHY]')
+            log_content = log_content.replace('🏗️', '[CONSTRUCTION]')
+            log_content = log_content.replace('🔢', '[NUMBERS]')
+            log_content = log_content.replace('⚙️', '[GEAR]')
+            log_content = log_content.replace('📋', '[CLIPBOARD]')
+            log_content = log_content.replace('🔬', '[MICROSCOPE]')
+            log_content = log_content.replace('💾', '[SAVE]')
+            log_content = log_content.replace('📝', '[MEMO]')
+            log_content = log_content.replace('🔄', '[CYCLE]')
+            log_content = log_content.replace('📁', '[FILES]')
+            f.write(log_content)
 
 # Initialize logger
 output_logger = OutputLogger()
@@ -192,6 +219,10 @@ class FlexibleCNN(nn.Module):
             self.activation = nn.LeakyReLU()
         elif activation == 'gelu':
             self.activation = nn.GELU()
+        elif activation == 'swish':
+            self.activation = nn.SiLU()  # SiLU is equivalent to Swish
+        elif activation == 'elu':
+            self.activation = nn.ELU()
         else:
             self.activation = nn.ReLU()
         
@@ -341,47 +372,55 @@ class ArchitectureOptimizer:
         
         if use_fc_layers:
             num_fc_layers = trial.suggest_int('num_fc_layers', 1, 3)
-            print(f"  📐 Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
+            print(f"  [RULER] Architecture: {num_conv_layers} conv layers, {num_fc_layers} FC layers")
         else:
             num_fc_layers = 0
-            print(f"  📐 Architecture: {num_conv_layers} conv layers, direct global pooling")
+            print(f"  [RULER] Architecture: {num_conv_layers} conv layers, direct global pooling")
         
-        # Convolutional layer parameters
+        # Store num_fc_layers for later use
+        trial.set_user_attr('num_fc_layers_actual', num_fc_layers)
+        
+        # Convolutional layer parameters with more extensive search ranges
         conv_channels = []
         kernel_sizes = []
         pool_sizes = []
         
+        # Use a shared base channels parameter for consistency
+        base_channels = trial.suggest_int('conv_base_channels', 8, 256)  # Wider range
+        
         for i in range(num_conv_layers):
-            # Channel progression: generally increasing
-            base_channels = trial.suggest_int(f'conv_base_channels', 16, 128)
-            multiplier = trial.suggest_float(f'conv_multiplier_{i}', 1.0, 3.0)
+            # Channel progression: generally increasing with more variety
+            multiplier = trial.suggest_float(f'conv_multiplier_{i}', 0.5, 4.0)  # Allow decreasing too
             channels = int(base_channels * (multiplier ** i))
-            channels = min(channels, 512)  # Cap at 512
+            channels = max(8, min(channels, 1024))  # Wider range: 8-1024
             conv_channels.append(channels)
             
-            # Kernel sizes
-            kernel_size = trial.suggest_int(f'kernel_size_{i}', 3, 15, step=2)  # Odd numbers
+            # Kernel sizes with more options
+            kernel_size = trial.suggest_int(f'kernel_size_{i}', 3, 21, step=2)  # Larger kernels
             kernel_sizes.append(kernel_size)
             
-            # Pool sizes
-            pool_size = trial.suggest_int(f'pool_size_{i}', 2, 4)
+            # Pool sizes with more options
+            pool_size = trial.suggest_int(f'pool_size_{i}', 2, 6)  # Larger pools
             pool_sizes.append(pool_size)
         
-        # Fully connected layer parameters (only if using FC layers)
+        # Fully connected layer parameters (only if using FC layers) with wider range
         fc_sizes = []
         if use_fc_layers:
             for i in range(num_fc_layers):
-                fc_size = trial.suggest_int(f'fc_size_{i}', 32, 512)
+                # Wider range and layer-dependent sizing
+                min_size = max(16, 1024 // (2 ** (i + 1)))  # Decreasing sizes
+                max_size = min(2048, 1024 // (2 ** i))      # Layer-dependent max
+                fc_size = trial.suggest_int(f'fc_size_{i}', min_size, max_size)
                 fc_sizes.append(fc_size)
         
-        # Other hyperparameters
-        dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.7)
-        learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
-        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-2, log=True)
-        batch_size = trial.suggest_int('batch_size', 16, 128, step=16)
+        # Other hyperparameters with more extensive ranges
+        dropout_rate = trial.suggest_float('dropout_rate', 0.0, 0.8)  # Include no dropout
+        learning_rate = trial.suggest_float('learning_rate', 1e-6, 5e-2, log=True)  # Wider range
+        weight_decay = trial.suggest_float('weight_decay', 1e-8, 1e-1, log=True)  # Wider range
+        batch_size = trial.suggest_int('batch_size', 8, 256, step=8)  # More options
         use_batch_norm = trial.suggest_categorical('use_batch_norm', [True, False])
-        activation = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'gelu'])
-        optimizer_type = trial.suggest_categorical('optimizer', ['adam', 'adamw', 'sgd'])
+        activation = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'gelu', 'swish', 'elu'])  # More activations
+        optimizer_type = trial.suggest_categorical('optimizer', ['adam', 'adamw', 'sgd', 'rmsprop'])  # More optimizers
         
         # Global pooling type (if not using FC layers or as final pooling)
         pooling_type = trial.suggest_categorical('pooling_type', ['avg', 'max', 'both'])
@@ -405,16 +444,19 @@ class ArchitectureOptimizer:
             param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(f"  🔢 Model parameters: {param_count:,}")
             
-            # Skip if too many parameters (memory constraint)
-            if param_count > 3_000_000:  # 1M parameters max
-                print(f"  ⚠️  Skipping: too many parameters ({param_count:,} > 3M)")
+            # Skip if too many parameters (memory constraint) - more lenient for extensive search
+            if param_count > 5_000_000:  # 5M parameters max for more exploration
+                print(f"  [WARNING] Skipping: too many parameters ({param_count:,} > 5M)")
                 return 0.0
             
-            # Create optimizer
+            # Create optimizer with more options
             if optimizer_type == 'adam':
                 optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
             elif optimizer_type == 'adamw':
                 optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            elif optimizer_type == 'rmsprop':
+                alpha = trial.suggest_float('rmsprop_alpha', 0.9, 0.999)
+                optimizer = optim.RMSprop(model.parameters(), lr=learning_rate, alpha=alpha, weight_decay=weight_decay)
             else:  # sgd
                 momentum = trial.suggest_float('momentum', 0.5, 0.99)
                 optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
@@ -423,11 +465,11 @@ class ArchitectureOptimizer:
             train_loader = self.create_balanced_loader(self.train_dataset, self.train_targets, batch_size)
             val_loader = DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False)
             
-            # Training loop with early stopping
+            # Training loop with early stopping - more epochs for extensive search
             criterion = nn.BCELoss()
-            max_epochs = 70
-            patience = 10  # High patience for early stopping
-            print(f"  🏋️  Training for up to {max_epochs} epochs (patience={patience})...")
+            max_epochs = 100  # More epochs for better convergence
+            patience = 15    # Higher patience for extensive search
+            print(f"  [TRAINING] Training for up to {max_epochs} epochs (patience={patience})...")
             
             best_val_accuracy = 0.0
             patience_counter = 0
@@ -568,11 +610,13 @@ class ArchitectureOptimizer:
                     
                     # Show best architecture so far
                     best_params = study.best_params
-                    fc_info = f"{best_params.get('num_fc_layers', 0)} FC" if best_params.get('use_fc_layers', False) else "No FC"
-                    print(f"  🏗️  Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {fc_info}")
-                    print(f"  📊 Best metrics - Acc: {study.best_trial.user_attrs.get('val_accuracy', 0):.4f}, F1: {study.best_trial.user_attrs.get('val_f1', 0):.4f}, AUC: {study.best_trial.user_attrs.get('val_auc', 0):.4f}")
-                    print(f"  🔢 Best params: {study.best_trial.user_attrs.get('param_count', 'N/A'):,} parameters")
-                    print(f"  ⚙️  Best config: {best_params.get('pooling_type', 'N/A')} pooling, {best_params.get('activation', 'N/A')} activation")
+                    # Use the stored actual num_fc_layers
+                    actual_fc_layers = study.best_trial.user_attrs.get('num_fc_layers_actual', best_params.get('num_fc_layers', 0))
+                    fc_info = f"{actual_fc_layers} FC" if best_params.get('use_fc_layers', False) else "No FC"
+                    print(f"  [CONSTRUCTION] Best architecture: {best_params.get('num_conv_layers', 'N/A')} conv, {fc_info}")
+                    print(f"  [CHART] Best metrics - Acc: {study.best_trial.user_attrs.get('val_accuracy', 0):.4f}, F1: {study.best_trial.user_attrs.get('val_f1', 0):.4f}, AUC: {study.best_trial.user_attrs.get('val_auc', 0):.4f}")
+                    print(f"  [NUMBERS] Best params: {study.best_trial.user_attrs.get('param_count', 'N/A'):,} parameters")
+                    print(f"  [GEAR] Best config: {best_params.get('pooling_type', 'N/A')} pooling, {best_params.get('activation', 'N/A')} activation")
                 
                 # Show current trial info
                 if trial.value is not None:
@@ -599,9 +643,10 @@ class ArchitectureOptimizer:
         best_params = study.best_params
         best_trial = study.best_trial
         
-        print(f"\n📊 BEST ARCHITECTURE:")
+        print(f"\n[CHART] BEST ARCHITECTURE:")
         print(f"  Convolutional layers: {best_params['num_conv_layers']}")
-        print(f"  Fully connected layers: {best_params['num_fc_layers']}")
+        actual_fc_layers = best_trial.user_attrs.get('num_fc_layers_actual', best_params.get('num_fc_layers', 0))
+        print(f"  Fully connected layers: {actual_fc_layers}")
         print(f"  Parameter count: {best_trial.user_attrs.get('param_count', 'N/A')}")
         print(f"  Validation F1: {best_trial.user_attrs.get('val_f1', 'N/A'):.4f}")
         print(f"  Validation AUC: {best_trial.user_attrs.get('val_auc', 'N/A'):.4f}")
@@ -724,7 +769,8 @@ def evaluate_best_model(study, train_dataset, val_dataset, test_dataset, class_w
     # Reconstruct best model
     num_conv_layers = best_params['num_conv_layers']
     use_fc_layers = best_params['use_fc_layers']
-    num_fc_layers = best_params.get('num_fc_layers', 0) if use_fc_layers else 0
+    # Get the actual num_fc_layers from user attributes or params
+    num_fc_layers = best_trial.user_attrs.get('num_fc_layers_actual', best_params.get('num_fc_layers', 0)) if use_fc_layers else 0
     
     conv_channels = []
     kernel_sizes = []
@@ -906,7 +952,7 @@ if __name__ == "__main__":
         print(f"\n🚀 Starting CNN architecture optimization...")
         print(f"Device: {device}")
         print(f"Dataset sizes - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
-        study = optimizer.optimize(n_trials=20, timeout=3600)  # 1 hour max, 20 trials for testing
+        study = optimizer.optimize(n_trials=100, timeout=3600)  # 1 hour max, 100 trials for extensive search
         
         # Visualize results
         viz_filename = get_timestamped_filename('cnn_architecture_optimization', 'png')
@@ -1018,11 +1064,21 @@ if __name__ == "__main__":
                     print(f"Best test accuracy: {final_results['test_accuracy']:.4f}")
                     print(f"Best test F1: {final_results['test_f1']:.4f}")
                     print(f"Model parameters: {final_results['param_count']:,}")
-                print(f"Architecture: {study.best_params['num_conv_layers']} conv layers, {study.best_params.get('num_fc_layers', 0)} FC layers")
+                actual_fc_layers = study.best_trial.user_attrs.get('num_fc_layers_actual', study.best_params.get('num_fc_layers', 0))
+                print(f"Architecture: {study.best_params['num_conv_layers']} conv layers, {actual_fc_layers} FC layers")
                 print(f"Uses FC layers: {study.best_params['use_fc_layers']}")
                 print(f"Pooling type: {study.best_params['pooling_type']}")
                 print(f"Activation: {study.best_params['activation']}")
                 print(f"Optimizer: {study.best_params['optimizer']}")
         
         print(f"Complete log available at: {log_path}")
+        
+        # List all files created
+        print(f"\n[FILES] FILES CREATED:")
+        if 'results_path' in locals():
+            print(f"  [CHART] Results: {results_path}")
+        if 'viz_path' in locals():
+            print(f"  [PROGRESS] Visualization: {viz_path}")
+        print(f"  [MEMO] Log: {log_path}")
+        
         print("="*80)

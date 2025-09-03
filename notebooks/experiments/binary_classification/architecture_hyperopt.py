@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 """
 CNN Architecture Hyperparameter Optimization for Binary Classification
 Optimizes number of convolutional layers, kernel sizes, and fully connected layers
 Uses Optuna for Bayesian optimization with effective pruning and generates extensive visualizations.
+Saves all trial results to a comprehensive CSV file.
 """
 
 import pandas as pd
@@ -29,8 +31,12 @@ from pathlib import Path
 
 warnings.filterwarnings('ignore')
 
+# --- Configuration ---
+SEED = 1356294
+EXPERIMENT_NAME = "binary_classification_cnn"
+
 # Set seeds for reproducibility
-def set_seed(seed=42):
+def set_seed(seed=SEED):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -38,15 +44,15 @@ def set_seed(seed=42):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-set_seed(42)
+set_seed()
 
 def get_timestamped_filename(base_name, extension):
-    """Generate a timestamped filename"""
+    """Helper Function: Generate a timestamped filename"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{base_name}_{timestamp}.{extension}"
 
 class OutputLogger:
-    """Captures all print outputs for logging"""
+    """Helper Function: Captures all print outputs for logging"""
     def __init__(self):
         self.log_buffer = StringIO()
         self.original_stdout = sys.stdout
@@ -62,7 +68,7 @@ class OutputLogger:
     def get_log(self): return self.log_buffer.getvalue()
     def save_log(self, filepath):
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(f"CNN Architecture Optimization Log\n")
+            f.write(f"Experiment - {EXPERIMENT_NAME} - Optimization Log\n")
             f.write(f"Started at: {time.ctime(self.start_time)}\n")
             f.write(f"Completed at: {time.ctime()}\n")
             f.write(f"Total runtime: {(time.time() - self.start_time)/60:.2f} minutes\n")
@@ -75,29 +81,34 @@ output_logger.start_logging()
 
 print("CNN ARCHITECTURE HYPERPARAMETER OPTIMIZATION")
 print("="*70)
-print("TARGET: Optimizing Conv layers, kernel sizes, FC layers")
-print("METHOD: Using Optuna Bayesian optimization with pruning")
-print("PLOTTING: Generating per-trial curves, study summary plots, and final model evaluation graphs.")
-print(f"OUTPUT: Files will be timestamped: {datetime.now().strftime('%Y%m%d_%H%M%S')}")
-print("-" * 70)
+print(f"EXPERIMENT: {EXPERIMENT_NAME}")
+print(f"SEED: {SEED}")
+print("PLOTTING: Per-trial curves, study summaries, and final model graphs.")
+print("OUTPUT: All results saved to a dedicated experiment folder.")
+print("="*70)
 
+# --- [MODIFIED] Set up organized output directories ---
 try:
     project_root = Path(__file__).resolve().parents[3]
 except NameError:
     print("WARNING: __file__ not defined. Assuming current directory is project root.")
     project_root = Path.cwd()
 
-results_dir = project_root / 'results'
-trial_plots_dir = results_dir / "trial_plots" # Directory for individual trial plots
-results_dir.mkdir(exist_ok=True)
-trial_plots_dir.mkdir(exist_ok=True)
+# Main experiment directory
+experiment_dir = project_root / 'results' / EXPERIMENT_NAME
+# Subdirectories for organized output
+trial_plots_dir = experiment_dir / "trial_plots"
+study_plots_dir = experiment_dir / "study_plots"
+final_model_plots_dir = experiment_dir / "final_model_plots"
+# Create all directories if they don't exist
+for d in [experiment_dir, trial_plots_dir, study_plots_dir, final_model_plots_dir]:
+    d.mkdir(parents=True, exist_ok=True)
+print(f"Results will be saved in: {experiment_dir}")
 
 data_path = project_root / 'data' / 'processed' / 'ProSeq_binary_classification.csv'
 print(f"Loading data from: {data_path}")
 
 data_binary = pd.read_csv(data_path)
-data_binary = data_binary[['binary_classification', 'ProSeq']]
-
 data_filtered = data_binary[data_binary['ProSeq'].str.len() >= 600].copy()
 print(f"Dataset size: {len(data_filtered)}")
 
@@ -109,7 +120,6 @@ for class_val, count in class_dist.items():
 class_weights = compute_class_weight('balanced', 
                                    classes=np.unique(data_filtered['binary_classification']),
                                    y=data_filtered['binary_classification'])
-print(f"Balanced class weights: {class_weights}")
 
 class BinaryClassificationDataset(Dataset):
     def __init__(self, data, target_length=600):
@@ -118,8 +128,7 @@ class BinaryClassificationDataset(Dataset):
         self.target_length = target_length
     def __len__(self): return len(self.data)
     def __getitem__(self, idx):
-        sequence = self.data.iloc[idx]['ProSeq']
-        target = self.data.iloc[idx]['binary_classification']
+        sequence, target = self.data.iloc[idx]['ProSeq'], self.data.iloc[idx]['binary_classification']
         return self.one_hot_encode(sequence), target
     def one_hot_encode(self, sequence):
         sequence = sequence[:self.target_length]
@@ -129,8 +138,8 @@ class BinaryClassificationDataset(Dataset):
                 one_hot[i, self.dna_dict[nucleotide]] = 1.0
         return one_hot
 
-train_data, test_data = train_test_split(data_filtered, test_size=0.2, random_state=42, stratify=data_filtered['binary_classification'])
-train_data, val_data = train_test_split(train_data, test_size=0.2, random_state=42, stratify=train_data['binary_classification'])
+train_data, test_data = train_test_split(data_filtered, test_size=0.2, random_state=SEED, stratify=data_filtered['binary_classification'])
+train_data, val_data = train_test_split(train_data, test_size=0.2, random_state=SEED, stratify=train_data['binary_classification'])
 print(f"\nData splits: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data)}")
 
 train_dataset = BinaryClassificationDataset(train_data)
@@ -138,7 +147,9 @@ val_dataset = BinaryClassificationDataset(val_data)
 test_dataset = BinaryClassificationDataset(test_data)
 
 class FlexibleCNN(nn.Module):
-    """Flexible CNN architecture with variable number of layers"""
+    """Flexible CNN architecture for hyperparameter optimization.
+    Allows for the optimization of the number of convolutional layers, kernel sizes, and fully connected layers.
+    """
     def __init__(self, num_conv_layers, conv_channels, kernel_sizes, pool_sizes,
                  num_fc_layers, fc_sizes, dropout_rate, use_batch_norm, activation, pooling_type, input_channels=4):
         super(FlexibleCNN, self).__init__()
@@ -202,38 +213,32 @@ class FlexibleCNN(nn.Module):
         
         return torch.sigmoid(self.output_layer(x)).squeeze()
 
-# --- [NEW] Plotting function for individual trial curves ---
 def _plot_trial_curves(trial_number, history, save_path):
+    """Helper Function: Plot training curves for each trial"""
     fig, ax1 = plt.subplots(figsize=(10, 6))
     fig.suptitle(f'Trial {trial_number} Training Curves', fontsize=16)
-
-    # Plot Training Loss
     color = 'tab:red'
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Avg. Training Loss', color=color)
     ax1.plot(history['epochs'], history['train_loss'], color=color, marker='o', label='Train Loss')
     ax1.tick_params(axis='y', labelcolor=color)
     ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
-
-    # Plot Validation Metrics on a second y-axis
     ax2 = ax1.twinx()
     color = 'tab:blue'
     ax2.set_ylabel('Validation Metric', color=color)
     ax2.plot(history['epochs'], history['val_auc'], color=color, marker='s', linestyle='--', label='Val AUC')
     ax2.plot(history['epochs'], history['val_acc'], color='tab:green', marker='^', linestyle=':', label='Val Accuracy')
     ax2.tick_params(axis='y', labelcolor=color)
-    
-    # Combine legends
     lines, labels = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines + lines2, labels + labels2, loc='best')
-
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(save_path)
-    plt.close(fig) # Prevent memory leaks
+    plt.close(fig)
     print(f"    Saved training curve plot to {save_path}")
 
 class ArchitectureOptimizer:
+    """Class for optimizing the architecture of the CNN."""
     def __init__(self, device, train_dataset, val_dataset, class_weights):
         self.device = device
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
@@ -241,31 +246,19 @@ class ArchitectureOptimizer:
         self.train_targets = train_data['binary_classification'].values
 
     def _create_model_from_params(self, params):
-        # ... (implementation from previous version, unchanged) ...
-        num_conv_layers = params['num_conv_layers']
-        use_fc_layers = params['use_fc_layers']
+        num_conv_layers, use_fc_layers = params['num_conv_layers'], params['use_fc_layers']
         num_fc_layers = params.get('num_fc_layers', 0) if use_fc_layers else 0
-
         conv_channels, kernel_sizes, pool_sizes = [], [], []
         base_channels = params['conv_base_channels']
         for i in range(num_conv_layers):
             multiplier = params[f'conv_multiplier_{i}']
-            channels = int(base_channels * (multiplier ** i))
-            conv_channels.append(max(8, min(channels, 1024)))
+            conv_channels.append(max(8, min(int(base_channels * (multiplier**i)), 1024)))
             kernel_sizes.append(params[f'kernel_size_{i}'])
             pool_sizes.append(params[f'pool_size_{i}'])
-        
         fc_sizes = [params[f'fc_size_{i}'] for i in range(num_fc_layers)] if use_fc_layers and num_fc_layers > 0 else []
-        
-        return FlexibleCNN(
-            num_conv_layers=num_conv_layers, conv_channels=conv_channels, kernel_sizes=kernel_sizes,
-            pool_sizes=pool_sizes, num_fc_layers=num_fc_layers, fc_sizes=fc_sizes,
-            dropout_rate=params['dropout_rate'], use_batch_norm=params['use_batch_norm'],
-            activation=params['activation'], pooling_type=params['pooling_type']
-        )
-    
+        return FlexibleCNN(num_conv_layers=num_conv_layers, conv_channels=conv_channels, kernel_sizes=kernel_sizes, pool_sizes=pool_sizes, num_fc_layers=num_fc_layers, fc_sizes=fc_sizes, dropout_rate=params['dropout_rate'], use_batch_norm=params['use_batch_norm'], activation=params['activation'], pooling_type=params['pooling_type'])
+
     def _create_optimizer_from_params(self, params, model):
-        # ... (implementation from previous version, unchanged) ...
         optimizer_type, lr, wd = params['optimizer'], params['learning_rate'], params['weight_decay']
         if optimizer_type == 'adam': return optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
         elif optimizer_type == 'adamw': return optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -273,29 +266,23 @@ class ArchitectureOptimizer:
         else: return optim.SGD(model.parameters(), lr=lr, momentum=params.get('momentum', 0.9), weight_decay=wd)
 
     def create_balanced_loader(self, dataset, targets, batch_size):
-        sample_weights = np.array([self.class_weights[t] for t in targets])
-        sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+        sampler = WeightedRandomSampler(weights=np.array([self.class_weights[t] for t in targets]), num_samples=len(targets), replacement=True)
         return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
 
     def objective(self, trial):
         print(f"\nTRIAL {trial.number} starting...")
-        # ... (hyperparameter suggestion logic is unchanged) ...
         num_conv_layers = trial.suggest_int('num_conv_layers', 2, 5)
         use_fc_layers = trial.suggest_categorical('use_fc_layers', [True, False])
         num_fc_layers = trial.suggest_int('num_fc_layers', 1, 3) if use_fc_layers else 0
         trial.set_user_attr('num_fc_layers_actual', num_fc_layers)
-        
-        base_channels = trial.suggest_int('conv_base_channels', 8, 256)
+        trial.suggest_int('conv_base_channels', 8, 256)
         for i in range(num_conv_layers):
             trial.suggest_float(f'conv_multiplier_{i}', 0.5, 4.0)
             trial.suggest_int(f'kernel_size_{i}', 3, 21, step=2)
             trial.suggest_int(f'pool_size_{i}', 2, 6)
-        
         if use_fc_layers:
             for i in range(num_fc_layers):
-                min_size, max_size = max(16, 1024 // (2 ** (i + 1))), min(2048, 1024 // (2 ** i))
-                trial.suggest_int(f'fc_size_{i}', min_size, max_size)
-        
+                trial.suggest_int(f'fc_size_{i}', max(16, 1024 // (2**(i+1))), min(2048, 1024 // (2**i)))
         trial.suggest_float('dropout_rate', 0.0, 0.8)
         trial.suggest_float('learning_rate', 1e-6, 5e-2, log=True)
         trial.suggest_float('weight_decay', 1e-8, 1e-1, log=True)
@@ -303,7 +290,6 @@ class ArchitectureOptimizer:
         trial.suggest_categorical('use_batch_norm', [True, False])
         trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'gelu', 'swish', 'elu'])
         optimizer_type = trial.suggest_categorical('optimizer', ['adam', 'adamw', 'sgd', 'rmsprop'])
-        
         if optimizer_type == 'rmsprop': trial.suggest_float('rmsprop_alpha', 0.9, 0.999)
         if optimizer_type == 'sgd': trial.suggest_float('momentum', 0.5, 0.99)
         trial.suggest_categorical('pooling_type', ['avg', 'max', 'both'])
@@ -315,51 +301,33 @@ class ArchitectureOptimizer:
             print(f"  Architecture: {num_conv_layers} conv, {num_fc_layers} FC. Params: {param_count:,}")
             if param_count > 5_000_000: return 0.0
 
-            batch_size = trial.params['batch_size']
-            train_loader = self.create_balanced_loader(self.train_dataset, self.train_targets, batch_size)
-            val_loader = DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False)
-            
+            train_loader = self.create_balanced_loader(self.train_dataset, self.train_targets, trial.params['batch_size'])
+            val_loader = DataLoader(self.val_dataset, batch_size=trial.params['batch_size'], shuffle=False)
             criterion = nn.BCELoss()
-            max_epochs, patience = 100, 15
+            max_epochs, patience = 100, 10
             best_val_auc, patience_counter, best_model_weights, best_epoch = 0.0, 0, None, 0
-            
-            # --- [MODIFIED] History tracking for plotting ---
             history = {'epochs': [], 'train_loss': [], 'val_auc': [], 'val_acc': []}
             
             for epoch in range(max_epochs):
-                model.train()
-                epoch_loss = 0.0
+                model.train(); epoch_loss = 0.0
                 for batch_x, batch_y in train_loader:
                     batch_x, batch_y = batch_x.to(self.device), batch_y.float().to(self.device)
-                    optimizer.zero_grad()
-                    outputs = model(batch_x)
-                    loss = criterion(outputs, batch_y)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
+                    optimizer.zero_grad(); outputs = model(batch_x); loss = criterion(outputs, batch_y)
+                    loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0); optimizer.step()
                     epoch_loss += loss.item()
-                
                 avg_train_loss = epoch_loss / len(train_loader)
                 
                 if (epoch + 1) % 3 == 0:
-                    model.eval()
-                    val_probs_es, val_targets_es = [], []
+                    model.eval(); val_probs_es, val_targets_es = [], []
                     with torch.no_grad():
                         for batch_x, batch_y in val_loader:
                             outputs = model(batch_x.to(self.device))
-                            val_probs_es.extend(outputs.cpu().numpy())
-                            val_targets_es.extend(batch_y.cpu().numpy())
-                    
+                            val_probs_es.extend(outputs.cpu().numpy()); val_targets_es.extend(batch_y.cpu().numpy())
                     val_preds_es = (np.array(val_probs_es) > 0.5).astype(int)
-                    val_auc_es = roc_auc_score(val_targets_es, val_probs_es)
-                    val_acc_es = accuracy_score(val_targets_es, val_preds_es)
+                    val_auc_es, val_acc_es = roc_auc_score(val_targets_es, val_probs_es), accuracy_score(val_targets_es, val_preds_es)
                     
-                    # --- [MODIFIED] Append to history ---
-                    history['epochs'].append(epoch + 1)
-                    history['train_loss'].append(avg_train_loss)
-                    history['val_auc'].append(val_auc_es)
-                    history['val_acc'].append(val_acc_es)
-
+                    history['epochs'].append(epoch + 1); history['train_loss'].append(avg_train_loss)
+                    history['val_auc'].append(val_auc_es); history['val_acc'].append(val_acc_es)
                     print(f"    Epoch {epoch+1}/{max_epochs}: Train Loss={avg_train_loss:.4f}, Val AUC={val_auc_es:.4f}, Val Acc={val_acc_es:.4f}")
                     
                     trial.report(val_auc_es, epoch)
@@ -369,101 +337,111 @@ class ArchitectureOptimizer:
                         best_val_auc, patience_counter, best_epoch = val_auc_es, 0, epoch + 1
                         best_model_weights = model.state_dict().copy()
                     else: patience_counter += 1
-                    
                     if patience_counter >= patience: print(f"    Early stopping at epoch {epoch+1}"); break
             
-            # --- [MODIFIED] Plot trial curves after successful completion ---
             if best_model_weights:
                 _plot_trial_curves(trial.number, history, trial_plots_dir / f"trial_{trial.number}_curves.png")
                 model.load_state_dict(best_model_weights)
-            else: # Handle cases where training finishes without improving
-                print("    Warning: No best model found during training.")
-                return 0.0
+            else: return 0.0
 
             val_f1 = f1_score(val_targets_es, val_preds_es) if len(set(val_preds_es)) > 1 else 0.0
-            print(f"  Results: F1={val_f1:.4f}, Best AUC={best_val_auc:.4f}, Best Acc={val_acc_es:.4f}")
-            
             trial.set_user_attr('val_accuracy', val_acc_es); trial.set_user_attr('val_f1', val_f1)
             trial.set_user_attr('val_auc', best_val_auc); trial.set_user_attr('param_count', param_count)
             trial.set_user_attr('best_epoch', best_epoch)
-            
-            print(f"  TRIAL {trial.number} COMPLETED. Objective (AUC): {best_val_auc:.4f}")
             return best_val_auc
             
         except optuna.exceptions.TrialPruned: print("    Trial pruned."); raise
         except Exception as e: print(f"  ERROR: Trial {trial.number} failed: {e}"); return 0.0
     
-    def optimize(self, n_trials=100, timeout=3600):
-        study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5, n_min_trials=5), sampler=optuna.samplers.TPESampler(seed=42))
+    def optimize(self, n_trials=100, timeout=7200):
+        study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=5, n_min_trials=5), sampler=optuna.samplers.TPESampler(seed=SEED))
         study.optimize(self.objective, n_trials=n_trials, timeout=timeout)
         return study
     
-    # --- [MODIFIED] Switched to Optuna's built-in visualization ---
-    def visualize_optimization(self, study, base_save_path):
+    def visualize_optimization(self, study, save_dir):
+        """Visualizing the optimization
+
+        Args:
+            study (_type_): Optuna study
+            save_dir (_type_): Path to save the plots
+        """
+
         print("\nCreating optimization summary visualizations...")
         try:
-            plots = {
-                'history': optuna.visualization.plot_optimization_history,
-                'param_importances': optuna.visualization.plot_param_importances,
-                'slice': optuna.visualization.plot_slice,
-                'contour': optuna.visualization.plot_contour,
-            }
+            plots = {'history': optuna.visualization.plot_optimization_history, 'param_importances': optuna.visualization.plot_param_importances, 'slice': optuna.visualization.plot_slice, 'contour': optuna.visualization.plot_contour}
             for name, plot_func in plots.items():
                 fig = plot_func(study)
-                save_path = base_save_path.with_name(f"{base_save_path.stem}_{name}.png")
-                fig.write_image(save_path, scale=2) # Higher resolution
+                save_path = save_dir / f"study_{name}.png"
+                fig.write_image(save_path, scale=2)
                 print(f"  Saved {name} plot to {save_path}")
         except (ImportError, RuntimeError) as e:
-            print(f"\n[WARNING] Could not generate Optuna plots. Please `pip install plotly kaleido` to enable them.")
-            print(f"Error details: {e}\n")
+            print(f"\n[WARNING] Could not generate Optuna plots. Please `pip install plotly kaleido`.")
 
-# --- [NEW] Plotting for final model evaluation ---
+
+def save_study_results_to_csv(study, save_path):
+    """Saves the detailed results of every trial in an Optuna study to a CSV file.
+
+    Args:
+        study (_type_): Optuna study
+        save_path (_type_): Path to save the CSV file
+    """
+    print(f"\nSaving full study results to CSV...")
+    df = study.trials_dataframe()
+    df.to_csv(save_path, index=False)
+    print(f"  Successfully saved results for {len(df)} trials to {save_path}")
+
 def plot_final_evaluation_results(results, save_dir):
+    """Plotting for final model evaluation
+
+    Args:
+        results (_type_): Results of the final model evaluation
+        save_dir (_type_): Path to save the plots
+
+    Returns:
+        _type_: Paths to the saved plots
+    """
     print("\nCreating final model evaluation plots...")
-    
-    # 1. Confusion Matrix
-    plt.figure(figsize=(8, 6))
-    cm = results['confusion_matrix']
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Class 0', 'Class 1'], yticklabels=['Class 0', 'Class 1'])
-    plt.title(f"Final Model Confusion Matrix\nAccuracy: {results['test_accuracy']:.4f}", fontsize=14)
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
     cm_path = save_dir / get_timestamped_filename('final_model_confusion_matrix', 'png')
-    plt.savefig(cm_path)
-    plt.close()
+    plt.figure(figsize=(8, 6)); sns.heatmap(results['confusion_matrix'], annot=True, fmt='d', cmap='Blues', xticklabels=['Class 0', 'Class 1'], yticklabels=['Class 0', 'Class 1'])
+    plt.title(f"Final Model Confusion Matrix\nAccuracy: {results['test_accuracy']:.4f}", fontsize=14)
+    plt.ylabel('True Label'); plt.xlabel('Predicted Label')
+    plt.savefig(cm_path); plt.close()
     print(f"  Saved confusion matrix plot to {cm_path}")
 
-    # 2. ROC Curve
-    plt.figure(figsize=(8, 6))
-    fpr, tpr, _ = roc_curve(results['test_targets'], results['test_probs'])
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f"ROC curve (AUC = {results['test_auc']:.4f})")
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Final Model Receiver Operating Characteristic (ROC) Curve', fontsize=14)
-    plt.legend(loc="lower right")
-    plt.grid(True, linestyle='--', linewidth=0.5)
     roc_path = save_dir / get_timestamped_filename('final_model_roc_curve', 'png')
-    plt.savefig(roc_path)
-    plt.close()
+    fpr, tpr, _ = roc_curve(results['test_targets'], results['test_probs'])
+    plt.figure(figsize=(8, 6)); plt.plot(fpr, tpr, color='darkorange', lw=2, label=f"ROC curve (AUC = {results['test_auc']:.4f})")
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0]); plt.ylim([0.0, 1.05]); plt.xlabel('False Positive Rate'); plt.ylabel('True Positive Rate')
+    plt.title('Final Model Receiver Operating Characteristic (ROC) Curve', fontsize=14)
+    plt.legend(loc="lower right"); plt.grid(True, linestyle='--', linewidth=0.5)
+    plt.savefig(roc_path); plt.close()
     print(f"  Saved ROC curve plot to {roc_path}")
     return [cm_path, roc_path]
 
 def evaluate_best_model(optimizer, study, train_dataset, val_dataset, test_dataset, device):
+    """Evaluating the best model on the test set
+
+    Args:
+        optimizer (_type_): Optimizer
+        study (_type_): Optuna study
+        train_dataset (_type_): Train dataset
+        val_dataset (_type_): Validation dataset
+        test_dataset (_type_): Test dataset
+        device (_type_): Device
+
+    Returns:
+        _type_: Results of the final model evaluation
+    """
     print(f"\nEVALUATING BEST MODEL ON TEST SET")
     best_params = study.best_params
     model = optimizer._create_model_from_params(best_params).to(device)
     optim = optimizer._create_optimizer_from_params(best_params, model)
     
-    print("Combining train and validation sets for final training...")
     combined_dataset = ConcatDataset([train_dataset, val_dataset])
     combined_targets = np.concatenate([train_data['binary_classification'].values, val_data['binary_classification'].values])
-    
     train_loader = optimizer.create_balanced_loader(combined_dataset, combined_targets, best_params['batch_size'])
     test_loader = DataLoader(test_dataset, batch_size=best_params['batch_size'], shuffle=False)
-    
     criterion = nn.BCELoss()
     num_epochs = study.best_trial.user_attrs.get('best_epoch', 50)
     print(f"Training best model for a fixed {num_epochs} epochs...")
@@ -472,21 +450,15 @@ def evaluate_best_model(optimizer, study, train_dataset, val_dataset, test_datas
     for epoch in range(num_epochs):
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(device), batch_y.float().to(device)
-            optim.zero_grad()
-            outputs = model(batch_x)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optim.step()
+            optim.zero_grad(); outputs = model(batch_x); loss = criterion(outputs, batch_y)
+            loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0); optim.step()
         if (epoch + 1) % 5 == 0: print(f"  Epoch {epoch+1}/{num_epochs}")
     
-    model.eval()
-    test_preds, test_targets, test_probs = [], [], []
+    model.eval(); test_preds, test_targets, test_probs = [], [], []
     with torch.no_grad():
         for batch_x, batch_y in test_loader:
             outputs = model(batch_x.to(device))
-            test_probs.extend(outputs.cpu().numpy())
-            test_targets.extend(batch_y.cpu().numpy())
+            test_probs.extend(outputs.cpu().numpy()); test_targets.extend(batch_y.cpu().numpy())
     test_preds = (np.array(test_probs) > 0.5).astype(int)
 
     results = {
@@ -495,43 +467,36 @@ def evaluate_best_model(optimizer, study, train_dataset, val_dataset, test_datas
         'test_f1': f1_score(test_targets, test_preds),
         'test_auc': roc_auc_score(test_targets, test_probs),
         'confusion_matrix': confusion_matrix(test_targets, test_preds).tolist(),
-        'test_targets': test_targets, 'test_probs': test_probs, # For plotting
+        'test_targets': test_targets, 'test_probs': test_probs,
         'param_count': sum(p.numel() for p in model.parameters() if p.requires_grad),
     }
-    print("\nFINAL TEST RESULTS:")
-    print(f"  Test Accuracy: {results['test_accuracy']:.4f}")
-    print(f"  Test F1 Score: {results['test_f1']:.4f}")
-    print(f"  Test AUC Score: {results['test_auc']:.4f}")
-    print(f"  Model parameters: {results['param_count']:,}")
+    print("\nFINAL TEST RESULTS:"); print(f"  Test Accuracy: {results['test_accuracy']:.4f}, F1: {results['test_f1']:.4f}, AUC: {results['test_auc']:.4f}")
     return results
 
-# Main execution
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     study, final_results = None, None
     error_occurred, error_message = False, ""
-    log_path, results_path, viz_path, final_plots_paths = None, None, None, []
     
     try:
         optimizer = ArchitectureOptimizer(device, train_dataset, val_dataset, class_weights)
         study = optimizer.optimize(n_trials=100, timeout=3600)
         
-        viz_path = results_dir / get_timestamped_filename('cnn_optimization_summary', 'png')
-        optimizer.visualize_optimization(study, viz_path)
+        optimizer.visualize_optimization(study, study_plots_dir)
         
-        final_results = evaluate_best_model(optimizer, study, train_dataset, val_dataset, test_dataset, device)
-        final_plots_paths = plot_final_evaluation_results(final_results, results_dir)
-        
-        # Clean up results dict for JSON saving
-        del final_results['test_targets']
-        del final_results['test_probs']
+        # --- [MODIFIED] Save study results to CSV ---
+        csv_path = experiment_dir / get_timestamped_filename(f'{EXPERIMENT_NAME}_study_results', 'csv')
+        save_study_results_to_csv(study, csv_path)
 
+        final_results = evaluate_best_model(optimizer, study, train_dataset, val_dataset, test_dataset, device)
+        final_plots_paths = plot_final_evaluation_results(final_results, final_model_plots_dir)
+        
+        del final_results['test_targets']; del final_results['test_probs']
         results_to_save = {'study_summary': {'best_value': study.best_value, 'best_params': study.best_params}, 'final_evaluation': final_results}
-        results_path = results_dir / get_timestamped_filename('cnn_optimization_results', 'json')
-        with open(results_path, 'w') as f: json.dump(results_to_save, f, indent=2, default=str)
-        print(f"\nResults summary saved to '{results_path}'")
+        json_path = experiment_dir / get_timestamped_filename(f'{EXPERIMENT_NAME}_results_summary', 'json')
+        with open(json_path, 'w') as f: json.dump(results_to_save, f, indent=2, default=str)
         
     except Exception as e:
         error_occurred, error_message = True, str(e)
@@ -539,15 +504,12 @@ if __name__ == "__main__":
         import traceback; traceback.print_exc()
         
     finally:
-        log_path = results_dir / get_timestamped_filename('cnn_optimization_log', 'txt')
+        log_path = experiment_dir / get_timestamped_filename(f'{EXPERIMENT_NAME}_log', 'txt')
         output_logger.save_log(log_path)
         print(f"Complete training log saved to '{log_path}'")
         output_logger.stop_logging()
         
         print("\n" + "="*80 + "\nFINAL SUMMARY\n" + "="*80)
-        print(f"Total runtime: {(time.time() - output_logger.start_time)/60:.2f} minutes")
-        if error_occurred: print(f"Error occurred: {error_message}")
-        
         if study and study.best_trial:
             print(f"Trials completed: {len(study.trials)}")
             print(f"Best validation AUC: {study.best_value:.4f}")
@@ -555,11 +517,11 @@ if __name__ == "__main__":
                 print(f"Final Test Accuracy: {final_results['test_accuracy']:.4f}, Test F1: {final_results['test_f1']:.4f}")
             print(f"Best Architecture: {study.best_params['num_conv_layers']} conv, {study.best_trial.user_attrs.get('num_fc_layers_actual', 0)} FC")
         
-        print(f"\nFILES CREATED:")
-        if results_path: print(f"  Results JSON: {results_path}")
-        if log_path: print(f"  Log File: {log_path}")
-        if viz_path: print(f"  Study Plots: {viz_path.parent / (viz_path.stem + '_*')}")
-        if final_plots_paths:
-            for p in final_plots_paths: print(f"  Final Model Plot: {p}")
-        print(f"  Per-Trial Plots: {trial_plots_dir}/")
+        print(f"\nFILES CREATED IN: {experiment_dir}")
+        print(f"  - Log File: {log_path.name}")
+        if 'json_path' in locals(): print(f"  - Results JSON: {json_path.name}")
+        if 'csv_path' in locals(): print(f"  - Study CSV: {csv_path.name}")
+        print(f"  - Study Plots saved in: {study_plots_dir.name}/")
+        print(f"  - Final Model Plots saved in: {final_model_plots_dir.name}/")
+        print(f"  - Per-Trial Plots saved in: {trial_plots_dir.name}/")
         print("="*80)

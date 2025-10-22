@@ -1,0 +1,66 @@
+CNN Architecture Optimization Log
+Started at: Wed Sep  3 11:49:01 2025
+Completed at: Wed Sep  3 12:14:59 2025
+Total runtime: 25.97 minutes
+================================================================================
+
+CNN ARCHITECTURE HYPERPARAMETER OPTIMIZATION
+======================================================================
+TARGET: Optimizing Conv layers, kernel sizes, FC layers
+METHOD: Using Optuna Bayesian optimization with pruning
+PLOTTING: Generating per-trial curves, study summary plots, and final model evaluation graphs.
+OUTPUT: Files will be timestamped: 20250903_114901
+----------------------------------------------------------------------
+Loading data from: /Users/jaydenthai/Dev/University Work/2025sem2/Data Science Research Project /DS-Research-Project-Tumor-Expression/data/processed/ProSeq_binary_classification.csv
+Dataset size: 8302
+
+Class distribution:
+  Class 0: 5217 (62.8%)
+  Class 1: 3085 (37.2%)
+Balanced class weights: [0.79566801 1.34554295]
+
+Data splits: Train=5312, Val=1329, Test=1661
+Using device: cpu
+
+TRIAL 0 starting...
+  Architecture: 3 conv, 2 FC. Params: 2,701,826
+    Epoch 3/100: Train Loss=5.9553, Val AUC=0.4933, Val Acc=0.6035
+    Epoch 6/100: Train Loss=4.4342, Val AUC=0.4938, Val Acc=0.6268
+    Epoch 9/100: Train Loss=3.5133, Val AUC=0.5018, Val Acc=0.6275
+    Epoch 12/100: Train Loss=3.4222, Val AUC=0.4968, Val Acc=0.5598
+    Epoch 15/100: Train Loss=2.5048, Val AUC=0.5033, Val Acc=0.6117
+    Epoch 18/100: Train Loss=2.3859, Val AUC=0.5260, Val Acc=0.6283
+    Epoch 21/100: Train Loss=2.1837, Val AUC=0.5146, Val Acc=0.6132
+    Epoch 24/100: Train Loss=2.1027, Val AUC=0.4832, Val Acc=0.6125
+    Epoch 27/100: Train Loss=1.9027, Val AUC=0.4838, Val Acc=0.6042
+    Epoch 30/100: Train Loss=1.6523, Val AUC=0.5200, Val Acc=0.6193
+    Epoch 33/100: Train Loss=1.7494, Val AUC=0.5136, Val Acc=0.5621
+    Epoch 36/100: Train Loss=1.5729, Val AUC=0.5183, Val Acc=0.5553
+    Epoch 39/100: Train Loss=1.5978, Val AUC=0.4917, Val Acc=0.6193
+    Epoch 42/100: Train Loss=1.2967, Val AUC=0.5068, Val Acc=0.5613
+    Epoch 45/100: Train Loss=1.2428, Val AUC=0.5150, Val Acc=0.4620
+    Epoch 48/100: Train Loss=1.0457, Val AUC=0.5055, Val Acc=0.4974
+    Epoch 51/100: Train Loss=1.0866, Val AUC=0.4915, Val Acc=0.5816
+    Epoch 54/100: Train Loss=0.7738, Val AUC=0.5105, Val Acc=0.5207
+    Epoch 57/100: Train Loss=0.7146, Val AUC=0.5169, Val Acc=0.5102
+    Epoch 60/100: Train Loss=0.6198, Val AUC=0.4742, Val Acc=0.5771
+    Epoch 63/100: Train Loss=0.5896, Val AUC=0.4978, Val Acc=0.5034
+    Early stopping at epoch 63
+    Saved training curve plot to /Users/jaydenthai/Dev/University Work/2025sem2/Data Science Research Project /DS-Research-Project-Tumor-Expression/results/trial_plots/trial_0_curves.png
+  Results: F1=0.4022, Best AUC=0.5260, Best Acc=0.5034
+  TRIAL 0 COMPLETED. Objective (AUC): 0.5260
+
+TRIAL 1 starting...
+  Architecture: 5 conv, 3 FC. Params: 7,864,460
+
+TRIAL 2 starting...
+  Architecture: 5 conv, 0 FC. Params: 5,528,956
+
+TRIAL 3 starting...
+  Architecture: 5 conv, 0 FC. Params: 18,221,600
+
+TRIAL 4 starting...
+  Architecture: 2 conv, 0 FC. Params: 1,462,420
+    Epoch 3/100: Train Loss=18.5085, Val AUC=0.5313, Val Acc=0.5786
+    Epoch 6/100: Train Loss=24.7634, Val AUC=0.5349, Val Acc=0.5508
+    Epoch 9/100: Train Loss=25.1897, Val AUC=0.5378, Val Acc=0.5523
